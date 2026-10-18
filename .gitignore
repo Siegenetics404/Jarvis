@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Voice models (too big for git, downloaded separately)
+*.onnx
+*.onnx.json
+*.bin
+
+# Secrets and local settings
+.env
+
+# Editor and OS
+.vscode/
+.idea/
+Thumbs.db
