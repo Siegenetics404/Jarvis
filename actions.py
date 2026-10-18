@@ -203,6 +203,26 @@ def open_website(url):
     return f"Opening {host}"
 
 
+def play_youtube(query):
+    """Find the best match on YouTube and open that video, which starts playing."""
+    try:
+        from yt_dlp import YoutubeDL
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"ytsearch5:{query}", download=False)
+        for entry in info.get("entries") or []:
+            vid = entry.get("id") or ""
+            if len(vid) == 11 and "/shorts/" not in (entry.get("url") or ""):
+                title = str(entry.get("title")).encode("ascii", "replace").decode()   # safe for the Windows console
+                print(f"[youtube] picked: {title} -> https://www.youtube.com/watch?v={vid}")
+                launch_browser(f"https://www.youtube.com/watch?v={vid}")
+                return f"Playing {query} on YouTube"
+    except Exception as e:
+        print("[youtube] lookup failed:", e)
+    launch_browser("https://www.youtube.com/results?search_query=" + quote_plus(query))
+    return f"I couldn't pick a video, sir, so I opened the YouTube results for {query}"
+
+
 # ------------------------------------------- tool registry (add new tools here)
 
 def _tool(name, description, params=None):
@@ -234,6 +254,9 @@ TOOL_SCHEMAS = [
           {"url": "Full web address of the site, e.g. https://github.com or https://laravel.com/docs"}),
     _tool("search_web", "Search the internet in the browser. Use this when the user asks to search, google, or look something up online.",
           {"query": "What to search for"}),
+    _tool("play_youtube", "Find a song or video on YouTube and play it right away. Use this when the user asks to play "
+                          "a song, music, or video, with or without saying YouTube.",
+          {"query": "The song or video name, plus the artist if the user said one, e.g. odoriko"}),
     _tool("quit_jarvis", "Shut down and exit Jarvis himself, this assistant program. Use it when the user tells Jarvis "
                          "to shut down, shut yourself down, shut your system, quit, exit, turn off, or go to sleep. "
                          "It does NOT turn off the computer and does NOT close any other app."),
@@ -246,6 +269,7 @@ TOOLS = {
     "get_time": get_time,
     "open_website": open_website,
     "search_web": search_web,
+    "play_youtube": play_youtube,
     "quit_jarvis": quit_jarvis,
 }
 

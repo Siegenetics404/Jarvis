@@ -44,6 +44,7 @@ SYSTEM = (
     "open_project to open a coding project, get_time for the time or date, "
     "open_website to open a website (pass its full https address), "
     "search_web to search the internet or look something up online, "
+    "play_youtube to play a song or video (the song name is the query), "
     "quit_jarvis when the user tells YOU to shut down, quit, exit, turn off, or go to sleep "
     "(it only closes you, never the computer or other apps). "
     "Call one tool per action and pass only the bare app or project name, without words like 'the app' or 'please'. "
@@ -52,6 +53,8 @@ SYSTEM = (
     "Searching only opens the results in the browser, you cannot read them out. "
     "The user may reply briefly, like 'yes' or 'do that', so use the earlier messages to understand what they mean."
 )
+
+PROMPT_HINT = "Jarvis, open Docker Desktop, close Ubuntu, open AmeFil project, play Odoriko on YouTube."
 
 PROMPT_HINT = "Jarvis, open Docker Desktop, close Ubuntu, open AmeFil project."
 
