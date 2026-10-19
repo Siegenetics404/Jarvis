@@ -35,7 +35,7 @@ BROWSER_OFFLINE = "I can't reach your browser, sir. Is the Jarvis Bridge extensi
 YES_WORDS = {"yes", "yeah", "yep", "yup", "sure", "okay", "ok", "please", "confirm", "proceed"}
 NO_WORDS = {"no", "nope", "cancel", "stop", "nevermind"}
 
-_pending = None            # a question Jarvis just asked, waiting for your yes or no
+_pending = None            # a question Jarvis just asked, waiting for your answer
 
 bridge.start()             # listens for the Chrome extension
 
@@ -143,6 +143,20 @@ def open_app(name):
     return f"Opening {match}"
 
 
+# Apps that keep running in the tray when you close their window have their own proper quit command.
+QUIT_COMMANDS = {
+    "docker": ["docker", "desktop", "stop"],
+}
+
+
+def _is_running(exe):
+    out = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/NH"],
+        capture_output=True, text=True,
+    ).stdout
+    return exe.lower() in out.lower()
+
+
 def close_app(name):
     apps = find_apps()
     match = best_match(name, list(apps))
@@ -153,20 +167,28 @@ def close_app(name):
         return f"Can't tell which process '{match}' runs (shortcut target: '{target}')"
     exe = Path(target).name
 
-    # 1. Is it really running?
-    check = subprocess.run(
-        ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/NH"],
-        capture_output=True, text=True,
-    )
-    if exe.lower() not in check.stdout.lower():
+    if not _is_running(exe):
         return f"{match} isn't running (looked for {exe})"
 
-    # 2. Ask politely
+    # Apps that hide in the tray when their window closes: use their own quit command
+    for key, command in QUIT_COMMANDS.items():
+        if key in match:
+            try:
+                done = subprocess.run(command, capture_output=True, timeout=90)
+                if done.returncode == 0:
+                    return f"Quit {match}."
+            except (OSError, subprocess.TimeoutExpired):
+                pass           # command missing or too slow, fall back to the normal way
+
+    # 1. Ask politely, which closes the window
     result = subprocess.run(["taskkill", "/IM", exe, "/T"], capture_output=True, text=True)
     if result.returncode == 0:
-        return f"Closing {match}"
+        time.sleep(2)
+        if _is_running(exe):
+            return f"I asked {match} to close, sir, but it's still running. It may be waiting on a prompt or hiding in the tray."
+        return f"Closed {match}"
 
-    # 3. It refused, so force it
+    # 2. It has no window left to close, or refused: force it
     result = subprocess.run(["taskkill", "/IM", exe, "/T", "/F"], capture_output=True, text=True)
     if result.returncode == 0:
         return f"Force closed {match}"
@@ -242,6 +264,11 @@ OUTDATED_EXTENSION = "My browser extension is out of date, sir. Please reload it
 _TAB_FILLER = {"the", "a", "tab", "tabs", "with", "my", "this", "that", "page", "pages",
                "website", "websites", "window"}
 
+# Chrome numbers tabs in the order they were opened, so the lowest ID is the oldest tab
+_FIRST_WORDS = {"first", "oldest"}
+_LAST_WORDS = {"last", "newest", "latest"}
+_ONE_WORDS = {"one", "single"}
+
 
 def _tabs(n):
     return f"{n} tab" + ("" if n == 1 else "s")
@@ -263,18 +290,32 @@ def _list_tabs():
     return bridge.request("list_tabs").get("tabs", [])
 
 
-def _close_ids(ids, label):
+def _pick_one(ids, which):
+    """Choose a single tab out of several. 'first'/'oldest' = the oldest, 'one'/'last'/'newest' = the newest.
+    Returns (tab id, 'oldest' or 'newest'), or (None, '') if `which` doesn't ask for a single tab."""
+    which = (which or "").strip().lower()
+    if which in _FIRST_WORDS:
+        return min(ids), "oldest"
+    if which in _LAST_WORDS or which in _ONE_WORDS or which == "1":
+        return max(ids), "newest"
+    return None, ""
+
+
+def _close_ids(ids, label, note=""):
     try:
         reply = bridge.request("close_ids", ids=list(ids))
     except Exception:
         return BROWSER_OFFLINE
     if reply.get("error"):
         return f"I couldn't do that, sir: {reply['error']}"
-    return f"Closed {_tabs(reply.get('closed', 0))}" + (f" matching {label}." if label else ".")
+    closed = reply.get("closed", 0)
+    if note and closed == 1:
+        return note
+    return f"Closed {_tabs(closed)}" + (f" matching {label}." if label else ".")
 
 
-def close_tabs(match):
-    """One matching tab closes at once. Several make Jarvis ask first."""
+def close_tabs(match, which=""):
+    """One matching tab closes at once. Several make Jarvis ask first, unless you said which one."""
     global _pending
     words = _words(match or "")
     if len("".join(words)) < 3:
@@ -288,9 +329,14 @@ def close_tabs(match):
         return f"I don't see any tabs matching {label}, sir."
     if any(t.get("id") is None for t in hits):
         return OUTDATED_EXTENSION
-    ids = [t["id"] for t in hits]
+    ids = sorted(t["id"] for t in hits)
     if len(ids) == 1:
         return _close_ids(ids, label)
+
+    chosen, age = _pick_one(ids, which)
+    if chosen is not None:
+        return _close_ids([chosen], label, note=f"Closed the {age} of your {len(ids)} {label} tabs, sir.")
+
     if _pending and time.monotonic() - _pending["time"] < 15:       # a second question in the same sentence
         _pending["ids"] = sorted(set(_pending["ids"]) | set(ids))
         _pending["label"] = ""
@@ -330,8 +376,9 @@ def wants_quit(text):
 
 
 def resolve_pending(text):
-    """Things that must not depend on the model: shutting down, and the yes or no to
-    'shall I close them all?'. Returns the reply, or None if the model should handle the text."""
+    """Things that must not depend on the model: shutting down, and your answer to
+    'shall I close them all?' (yes, no, only one, the first one...).
+    Returns the reply, or None if the model should handle the text."""
     global _pending
     pending, _pending = _pending, None             # any answer, or any other sentence, ends the question
     if wants_quit(text):
@@ -342,10 +389,18 @@ def resolve_pending(text):
     words = re.findall(r"[a-z']+", lowered)
     if not words:
         return None
+    wset = set(words)
+    ids = sorted(pending["ids"])
+
+    # "only one", "just one", "the first one", "the newest"...
+    if len(words) <= 6 and wset & (_FIRST_WORDS | _LAST_WORDS | _ONE_WORDS):
+        chosen, age = (min(ids), "oldest") if wset & _FIRST_WORDS else (max(ids), "newest")
+        return _close_ids([chosen], pending["label"], note=f"Closed the {age} of those {len(ids)} tabs, sir.")
+
     if words[0] in NO_WORDS or "don't" in words or "never" in words:
         return "Very well, sir. I'll leave them."
     if words[0] in YES_WORDS or "go ahead" in lowered or "do it" in lowered or "close them" in lowered:
-        return _close_ids(pending["ids"], pending["label"])
+        return _close_ids(ids, pending["label"])
     return None
 
 
@@ -385,8 +440,12 @@ TOOL_SCHEMAS = [
           {"query": "The song or video name, plus the artist if the user said one, e.g. odoriko"}),
     _tool("close_tabs", "Close browser tabs (websites) whose title or address contains the given words. Use this for "
                         "'close youtube', 'close the odoriko tab', 'close the extension tab'. To close several "
-                        "different tabs, call this once for each tab.",
-          {"match": "A few words from the tab's title or website, e.g. youtube, odoriko, youtube one republic, extensions"}),
+                        "different tabs, call this once for each tab. If the user wants only one of several "
+                        "matching tabs, set which.",
+          {"match": "A few words from the tab's title or website, e.g. youtube, odoriko, youtube one republic, extensions",
+           "which": "Leave empty to close every match. Use 'one' when the user wants only one of several matching "
+                    "tabs, 'first' for the oldest one, 'last' for the newest one"},
+          optional=("which",)),
     _tool("count_tabs", "Say how many browser tabs are open, optionally only the ones matching a word.",
           {"match": "Optional short word from the tab's title or website, e.g. youtube"}, optional=("match",)),
     _tool("quit_jarvis", "Shut down and exit Jarvis himself, this assistant program. Use it when the user tells Jarvis "

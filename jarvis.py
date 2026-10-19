@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+import traceback
 from collections import deque
 
 import numpy as np
@@ -23,9 +24,14 @@ WAKE_CUTOFF = 0.65
 
 FOLLOWUP_SECONDS = 6       # how long he keeps listening after he answers
 MAX_HISTORY = 8            # messages remembered during a conversation (4 exchanges)
+SHOW_IGNORED = True        # flash the panel red when he hears speech without his name
 
 VOICE = "bm_fable"
 VOICE_SPEED = 1.0          # try 0.9 for a slower, calmer delivery
+
+# If a tool's reply contains one of these, the panel shows it as an error
+ERROR_HINTS = ("couldn't", "can't", "failed", "unknown tool", "isn't running", "don't see",
+               "out of date", "only open", "which tabs", "not allowed")
 
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
 body = Body()              # the floating panel
@@ -64,19 +70,28 @@ def rms(block):
     return float(np.sqrt(np.mean(block ** 2)))
 
 
-def speak(text, stream):
-    """Say the text out loud, then throw away anything the mic heard meanwhile."""
+def looks_like_error(text):
+    lowered = text.lower()
+    return any(hint in lowered for hint in ERROR_HINTS)
+
+
+def speak(text, stream, error=False):
+    """Say the text out loud, then throw away anything the mic heard meanwhile.
+    With error=True the panel shows red while he speaks, then fades back to idle."""
     print("Jarvis:", text)
     samples, rate = tts.create(text, voice=VOICE, speed=VOICE_SPEED, lang="en-gb")
     body.set_jarvis(text, duration=len(samples) / rate)   # text types out as he speaks
-    body.set_state("speaking")
+    body.set_state("error" if error else "speaking")
     sd.play(samples, rate)
     sd.wait()
     time.sleep(0.3)  # let the room echo die down
     waiting = stream.read_available
     if waiting:
         stream.read(waiting)
-    body.set_state("idle")
+    if error:
+        body.flash("error", 2.5)
+    else:
+        body.set_state("idle")
 
 
 def shutdown():
@@ -152,7 +167,7 @@ def handle(text, stream):
     # Shutdown requests, and the yes or no to "shall I close them all?", are handled here, not by the model
     answer = resolve_pending(text)
     if answer:
-        speak(answer, stream)
+        speak(answer, stream, error=looks_like_error(answer))
         if QUIT.is_set():          # he has said goodbye, now actually leave
             shutdown()
         remember(text, answer)
@@ -169,7 +184,7 @@ def handle(text, stream):
         )
     except Exception as e:
         print("LM Studio error:", e)
-        speak("I can't reach my brain, sir. Is LM Studio's server running?", stream)
+        speak("I can't reach my brain, sir. Is LM Studio's server running?", stream, error=True)
         return
     msg = resp.choices[0].message
     if not msg.tool_calls:
@@ -181,7 +196,7 @@ def handle(text, stream):
     for call in msg.tool_calls:
         result = run_tool(call.function.name, call.function.arguments)
         results.append(result)
-        speak(result, stream)
+        speak(result, stream, error=looks_like_error(result))
     if QUIT.is_set():          # he has said goodbye, now actually leave
         shutdown()
     remember(text, " ".join(results))
@@ -215,47 +230,74 @@ def follow_up(stream, threshold):
     body.set_state("idle")
 
 
+def listen_once(stream, threshold):
+    """Wait for one thing you say. Acts on it if it starts with his name, otherwise ignores it."""
+    audio = wait_for_utterance(stream, threshold)
+    if audio is None:
+        body.set_state("idle")
+        return
+    text = transcribe(audio)
+    if not text:
+        body.set_state("idle")
+        return
+
+    heard, command = split_wake_word(text)
+    if not heard:
+        print(f"(ignored: {text})")
+        if SHOW_IGNORED:
+            body.set_user(text)
+            body.set_jarvis("Ignored: I didn't hear my name.")
+            body.flash("ignored", 1.8)
+        else:
+            body.set_state("idle")
+        return
+
+    if not command:
+        speak("Yes, sir?", stream)
+        audio = wait_for_utterance(stream, threshold)
+        if audio is None:
+            body.set_state("idle")
+            return
+        command = transcribe(audio)
+        if not command:
+            body.set_state("idle")
+            return
+
+    run_command(command, stream)
+    follow_up(stream, threshold)
+
+
+def report_error(e):
+    """Show the problem on the panel, print the details, and carry on listening."""
+    traceback.print_exc()
+    history.clear()
+    body.set_jarvis(f"Error: {e}")
+    body.flash("error", 5)
+
+
 def jarvis_loop():
     global stt, tts
-    body.set_state("thinking")
-    body.set_jarvis("Loading models...")
-    stt = WhisperModel("base.en", device="cpu", compute_type="int8")
-    tts = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
+    try:
+        body.set_state("thinking")
+        body.set_jarvis("Loading models...")
+        stt = WhisperModel("base.en", device="cpu", compute_type="int8")
+        tts = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=BLOCK) as stream:
-        body.set_jarvis("Calibrating... stay quiet for a second.")
-        threshold = calibrate(stream)
-        speak("Good evening, sir. All systems are online.", stream)
-        print("Jarvis is listening. Say 'Jarvis ...' (or right-click the panel to quit)")
-        while True:
-            audio = wait_for_utterance(stream, threshold)
-            if audio is None:
-                body.set_state("idle")
-                continue
-            text = transcribe(audio)
-            if not text:
-                body.set_state("idle")
-                continue
-
-            heard, command = split_wake_word(text)
-            if not heard:
-                print(f"(ignored: {text})")
-                body.set_state("idle")
-                continue
-
-            if not command:
-                speak("Yes, sir?", stream)
-                audio = wait_for_utterance(stream, threshold)
-                if audio is None:
-                    body.set_state("idle")
-                    continue
-                command = transcribe(audio)
-                if not command:
-                    body.set_state("idle")
-                    continue
-
-            run_command(command, stream)
-            follow_up(stream, threshold)
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=BLOCK) as stream:
+            body.set_jarvis("Calibrating... stay quiet for a second.")
+            threshold = calibrate(stream)
+            speak("Good evening, sir. All systems are online.", stream)
+            print("Jarvis is listening. Say 'Jarvis ...' (or right-click the panel to quit)")
+            while True:
+                try:
+                    listen_once(stream, threshold)
+                except Exception as e:
+                    report_error(e)
+                    time.sleep(1)       # avoid a tight loop if the same thing keeps failing
+    except Exception as e:
+        traceback.print_exc()
+        body.set_state("error")
+        body.set_jarvis(f"I couldn't start, sir: {e}")
 
 
 threading.Thread(target=jarvis_loop, daemon=True).start()

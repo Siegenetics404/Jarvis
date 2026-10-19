@@ -1,6 +1,7 @@
 import math
 import queue
 import random
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -28,6 +29,8 @@ STATES = {
     "listening": dict(color=(0, 229, 255), rot=0.008, spawn=0.12, amp=0.04, freq=2.5),
     "thinking":  dict(color=(255, 179, 0), rot=0.030, spawn=0.55, amp=0.02, freq=5.0),
     "speaking":  dict(color=(124, 255, 178), rot=0.012, spawn=0.30, amp=0.07, freq=6.0),
+    "ignored":   dict(color=(176, 84, 96), rot=0.003, spawn=0.02, amp=0.00, freq=1.0),
+    "error":     dict(color=(255, 72, 72), rot=0.020, spawn=0.40, amp=0.05, freq=5.0),
 }
 
 
@@ -106,6 +109,8 @@ class Typer:
 class Body:
     def __init__(self):
         self.state = "idle"
+        self.flash_state = None           # a state that fades back to idle by itself (ignored, error)
+        self.flash_until = 0.0
         self.user = Typer()
         self.jarvis = Typer()
         self.scroll = 0
@@ -183,6 +188,10 @@ class Body:
         if state in STATES:
             self.state = state
 
+    def flash(self, state, seconds=2.0):
+        """Show a state for a few seconds, then go back to idle by itself."""
+        self._q.put(("flash", state, seconds))
+
     def set_user(self, text):
         self._q.put(("user", " ".join(text.split()), USER_CPS))
 
@@ -198,14 +207,18 @@ class Body:
     def _drain(self):
         while True:
             try:
-                kind, text, cps = self._q.get_nowait()
+                kind, text, value = self._q.get_nowait()
             except queue.Empty:
                 break
             if kind == "user":
-                self.user.set(text, cps)
-            else:
-                self.jarvis.set(text, cps)
+                self.user.set(text, value)
+            elif kind == "jarvis":
+                self.jarvis.set(text, value)
                 self.scroll = 0
+            elif kind == "flash" and text in STATES:
+                self.state = text
+                self.flash_state = text
+                self.flash_until = time.monotonic() + value
 
     def _project(self, scale):
         cy, sy = math.cos(self.ay), math.sin(self.ay)
@@ -263,6 +276,13 @@ class Body:
     def _tick(self):
         self.frame += 1
         self._drain()
+
+        # A flashed state (ignored, error) returns to idle by itself, unless something else took over
+        if self.flash_state and time.monotonic() >= self.flash_until:
+            if self.state == self.flash_state:
+                self.state = "idle"
+            self.flash_state = None
+
         self.user.step(FRAME_MS / 1000)
         self.jarvis.step(FRAME_MS / 1000)
 
@@ -387,6 +407,8 @@ if __name__ == "__main__":
         ("listening", "", "", 3),
         ("thinking", "Jarvis, open docker desktop", "", 4),
         ("speaking", "Jarvis, open docker desktop", "Opening docker desktop, sir.", 5),
+        ("ignored", "what is the weather like", "Ignored: I didn't hear my name.", 4),
+        ("error", "Jarvis, open docker desktop", "I can't reach my brain, sir. Is LM Studio's server running?", 5),
         ("speaking", "Jarvis, what time is it?", long_reply, 16),
     ]
 
