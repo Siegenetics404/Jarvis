@@ -1,12 +1,16 @@
 import difflib
 import json
 import os
+import re
 import subprocess
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
+
+import browser_bridge as bridge
 
 # Set when the user tells Jarvis to shut himself down. jarvis.py checks it after he says goodbye.
 QUIT = threading.Event()
@@ -26,6 +30,14 @@ START_MENU = [
     Path(os.environ.get("ProgramData", "")) / "Microsoft/Windows/Start Menu/Programs",
     Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
 ]
+
+BROWSER_OFFLINE = "I can't reach your browser, sir. Is the Jarvis Bridge extension switched on in Chrome?"
+YES_WORDS = {"yes", "yeah", "yep", "yup", "sure", "okay", "ok", "please", "confirm", "proceed"}
+NO_WORDS = {"no", "nope", "cancel", "stop", "nevermind"}
+
+_pending = None            # a question Jarvis just asked, waiting for your yes or no
+
+bridge.start()             # listens for the Chrome extension
 
 
 def best_match(query, names):
@@ -223,9 +235,123 @@ def play_youtube(query):
     return f"I couldn't pick a video, sir, so I opened the YouTube results for {query}"
 
 
+# ------------------------------------------------------- browser tabs
+
+OUTDATED_EXTENSION = "My browser extension is out of date, sir. Please reload it in Chrome."
+
+_TAB_FILLER = {"the", "a", "tab", "tabs", "with", "my", "this", "that", "page", "pages",
+               "website", "websites", "window"}
+
+
+def _tabs(n):
+    return f"{n} tab" + ("" if n == 1 else "s")
+
+
+def _words(target):
+    """The words that matter in what you said, without fillers like 'the' or 'tab'."""
+    return [w for w in re.findall(r"[a-z0-9]+", target.lower()) if w not in _TAB_FILLER]
+
+
+def _tab_matches(tab, words):
+    """True if every word is in the tab's title or address. Spaces and punctuation are
+    ignored, so 'one republic' matches 'OneRepublic'."""
+    haystack = re.sub(r"[^a-z0-9]", "", f"{tab.get('title') or ''} {tab.get('url') or ''}".lower())
+    return all(w in haystack for w in words)
+
+
+def _list_tabs():
+    return bridge.request("list_tabs").get("tabs", [])
+
+
+def _close_ids(ids, label):
+    try:
+        reply = bridge.request("close_ids", ids=list(ids))
+    except Exception:
+        return BROWSER_OFFLINE
+    if reply.get("error"):
+        return f"I couldn't do that, sir: {reply['error']}"
+    return f"Closed {_tabs(reply.get('closed', 0))}" + (f" matching {label}." if label else ".")
+
+
+def close_tabs(match):
+    """One matching tab closes at once. Several make Jarvis ask first."""
+    global _pending
+    words = _words(match or "")
+    if len("".join(words)) < 3:
+        return "Which tabs, sir? Give me a word from their title or website."
+    label = " ".join(words)
+    try:
+        hits = [t for t in _list_tabs() if _tab_matches(t, words)]
+    except Exception:
+        return BROWSER_OFFLINE
+    if not hits:
+        return f"I don't see any tabs matching {label}, sir."
+    if any(t.get("id") is None for t in hits):
+        return OUTDATED_EXTENSION
+    ids = [t["id"] for t in hits]
+    if len(ids) == 1:
+        return _close_ids(ids, label)
+    if _pending and time.monotonic() - _pending["time"] < 15:       # a second question in the same sentence
+        _pending["ids"] = sorted(set(_pending["ids"]) | set(ids))
+        _pending["label"] = ""
+        _pending["time"] = time.monotonic()
+        return f"That's {_tabs(len(_pending['ids']))} altogether, sir. Shall I close them all?"
+    _pending = {"ids": ids, "label": label, "time": time.monotonic()}
+    return f"That's {_tabs(len(ids))} matching {label}, sir. Shall I close them all?"
+
+
+def count_tabs(match=""):
+    words = _words(match or "")
+    try:
+        tabs = _list_tabs()
+    except Exception:
+        return BROWSER_OFFLINE
+    if len("".join(words)) < 3:
+        return f"You have {_tabs(len(tabs))} open, sir."
+    hits = [t for t in tabs if _tab_matches(t, words)]
+    return f"You have {_tabs(len(hits))} matching {' '.join(words)}, out of {len(tabs)} in total, sir."
+
+
+_QUIT_FILLER = {"please", "sir", "now", "hey", "ok", "okay", "can", "you", "could", "would",
+                "will", "just", "the", "a", "kindly", "thanks", "thank"}
+_QUIT_WORDS = {"shut", "down", "yourself", "your", "system", "offline", "go", "to", "sleep",
+               "it", "up", "quit", "exit", "goodbye", "bye", "good", "turn", "off", "power"}
+_QUIT_TRIGGERS = {"shut", "offline", "quit", "exit", "goodbye", "bye", "sleep", "off", "power"}
+
+
+def wants_quit(text):
+    """True only when the whole sentence is a request for Jarvis to shut himself down."""
+    words = []
+    for w in re.findall(r"[a-z']+", text.lower()):
+        if w in _QUIT_FILLER or difflib.SequenceMatcher(None, w, "jarvis").ratio() >= 0.65:
+            continue        # filler, or a leftover "Jarvis" that Whisper misspelled
+        words.append(w)
+    return bool(words) and all(w in _QUIT_WORDS for w in words) and any(w in _QUIT_TRIGGERS for w in words)
+
+
+def resolve_pending(text):
+    """Things that must not depend on the model: shutting down, and the yes or no to
+    'shall I close them all?'. Returns the reply, or None if the model should handle the text."""
+    global _pending
+    pending, _pending = _pending, None             # any answer, or any other sentence, ends the question
+    if wants_quit(text):
+        return quit_jarvis()
+    if not pending or time.monotonic() - pending["time"] > 30:
+        return None
+    lowered = text.lower()
+    words = re.findall(r"[a-z']+", lowered)
+    if not words:
+        return None
+    if words[0] in NO_WORDS or "don't" in words or "never" in words:
+        return "Very well, sir. I'll leave them."
+    if words[0] in YES_WORDS or "go ahead" in lowered or "do it" in lowered or "close them" in lowered:
+        return _close_ids(pending["ids"], pending["label"])
+    return None
+
+
 # ------------------------------------------- tool registry (add new tools here)
 
-def _tool(name, description, params=None):
+def _tool(name, description, params=None, optional=()):
     """Build the schema the model sees. params = {arg_name: description}."""
     params = params or {}
     return {
@@ -236,7 +362,7 @@ def _tool(name, description, params=None):
             "parameters": {
                 "type": "object",
                 "properties": {k: {"type": "string", "description": v} for k, v in params.items()},
-                "required": list(params),
+                "required": [k for k in params if k not in optional],
             },
         },
     }
@@ -245,8 +371,8 @@ def _tool(name, description, params=None):
 TOOL_SCHEMAS = [
     _tool("open_app", "Open an application installed on the computer",
           {"name": "Name of the app, e.g. docker, ubuntu, chrome"}),
-    _tool("close_app", "Close a running application. Use this when the user says close, quit, exit, or stop an app.",
-          {"name": "Name of the app, e.g. docker, chrome"}),
+    _tool("close_app", "Close a desktop application, a program. Not for websites or browser tabs.",
+          {"name": "Name of the app, e.g. docker, vscode"}),
     _tool("open_project", "Open a coding project in VS Code by its folder name",
           {"name": "Name of the project folder, e.g. amefil"}),
     _tool("get_time", "Get the current local time and today's date. Use this whenever the user asks what time or day it is."),
@@ -257,6 +383,12 @@ TOOL_SCHEMAS = [
     _tool("play_youtube", "Find a song or video on YouTube and play it right away. Use this when the user asks to play "
                           "a song, music, or video, with or without saying YouTube.",
           {"query": "The song or video name, plus the artist if the user said one, e.g. odoriko"}),
+    _tool("close_tabs", "Close browser tabs (websites) whose title or address contains the given words. Use this for "
+                        "'close youtube', 'close the odoriko tab', 'close the extension tab'. To close several "
+                        "different tabs, call this once for each tab.",
+          {"match": "A few words from the tab's title or website, e.g. youtube, odoriko, youtube one republic, extensions"}),
+    _tool("count_tabs", "Say how many browser tabs are open, optionally only the ones matching a word.",
+          {"match": "Optional short word from the tab's title or website, e.g. youtube"}, optional=("match",)),
     _tool("quit_jarvis", "Shut down and exit Jarvis himself, this assistant program. Use it when the user tells Jarvis "
                          "to shut down, shut yourself down, shut your system, quit, exit, turn off, or go to sleep. "
                          "It does NOT turn off the computer and does NOT close any other app."),
@@ -270,6 +402,8 @@ TOOLS = {
     "open_website": open_website,
     "search_web": search_web,
     "play_youtube": play_youtube,
+    "close_tabs": close_tabs,
+    "count_tabs": count_tabs,
     "quit_jarvis": quit_jarvis,
 }
 

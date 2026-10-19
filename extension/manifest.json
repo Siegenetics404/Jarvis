@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Jarvis Bridge",
+  "version": "1.0",
+  "description": "Lets the local Jarvis assistant manage browser tabs.",
+  "permissions": ["tabs", "alarms"],
+  "background": { "service_worker": "background.js" }
+}

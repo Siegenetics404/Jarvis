@@ -10,7 +10,7 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from openai import OpenAI
-from actions import run_tool, TOOL_SCHEMAS, QUIT
+from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from body import Body
 
 SAMPLE_RATE = 16000
@@ -40,11 +40,14 @@ SYSTEM = (
     "in the style of the Jarvis from the Iron Man films: calm, dry, polite, quietly witty. "
     "Address the user as 'sir'. Your replies are spoken aloud, so keep them to one or two short sentences, "
     "with no lists, markdown, or emojis. "
-    "Use a tool whenever one fits the request: open_app to open an app, close_app to close one, "
+    "Use a tool whenever one fits the request: open_app to open an app, close_app to close a desktop program, "
     "open_project to open a coding project, get_time for the time or date, "
     "open_website to open a website (pass its full https address), "
     "search_web to search the internet or look something up online, "
     "play_youtube to play a song or video (the song name is the query), "
+    "close_tabs to close browser tabs or websites, once for each tab "
+    "(pass a few words from the tab's title or site), "
+    "count_tabs to say how many tabs are open, "
     "quit_jarvis when the user tells YOU to shut down, quit, exit, turn off, or go to sleep "
     "(it only closes you, never the computer or other apps). "
     "Call one tool per action and pass only the bare app or project name, without words like 'the app' or 'please'. "
@@ -55,8 +58,6 @@ SYSTEM = (
 )
 
 PROMPT_HINT = "Jarvis, open Docker Desktop, close Ubuntu, open AmeFil project, play Odoriko on YouTube."
-
-PROMPT_HINT = "Jarvis, open Docker Desktop, close Ubuntu, open AmeFil project."
 
 
 def rms(block):
@@ -147,6 +148,16 @@ def remember(user_text, reply):
 
 def handle(text, stream):
     body.set_state("thinking")
+
+    # Shutdown requests, and the yes or no to "shall I close them all?", are handled here, not by the model
+    answer = resolve_pending(text)
+    if answer:
+        speak(answer, stream)
+        if QUIT.is_set():          # he has said goodbye, now actually leave
+            shutdown()
+        remember(text, answer)
+        return
+
     messages = [{"role": "system", "content": SYSTEM}] + history[-MAX_HISTORY:] + [
         {"role": "user", "content": text}
     ]
