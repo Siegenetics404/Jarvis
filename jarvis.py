@@ -5,6 +5,7 @@ import signal
 import threading
 import time
 import traceback
+import winsound
 from collections import deque
 
 import numpy as np
@@ -14,6 +15,7 @@ from kokoro_onnx import Kokoro
 from openai import OpenAI
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from body import Body
+from skills import notifications
 
 SAMPLE_RATE = 16000
 BLOCK = 512                # 32 ms per read
@@ -39,6 +41,8 @@ ERROR_HINTS = ("couldn't", "can't", "failed", "unknown tool", "isn't running", "
 STOP_TRIGGERS = {"stop", "cancel", "abort", "enough", "quiet", "nevermind"}
 STOP_FILLER = {"it", "that", "this", "now", "please", "sir", "right", "oh", "just", "all",
                "everything", "talking", "never", "mind", "be", "okay", "ok"}
+
+NOTICE = object()          # returned by wait_for_utterance when a reminder is waiting to be spoken
 
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
 body = Body()              # the floating panel
@@ -185,11 +189,24 @@ def speak(text, stream, error=False):
         body.set_state("idle")
 
 
+def deliver_notifications(stream):
+    """Speak anything the skills have queued, like a reminder that just came due. Two beeps first."""
+    while not notifications.empty():
+        message = notifications.get()
+        try:
+            winsound.Beep(880, 150)
+            winsound.Beep(1175, 200)
+        except Exception:
+            pass
+        body.set_user("Reminder")
+        speak(message, stream)
+
+
 def shutdown():
     """Exit the whole program, panel included, like pressing Ctrl+C."""
     body.set_state("idle")
     print("Jarvis offline.", flush=True)
-    os._exit(0)     # a hard exit is fine for now: nothing needs saving yet
+    os._exit(0)     # a hard exit is fine: reminders and notes are saved the moment they are made
 
 
 def calibrate(stream):
@@ -201,8 +218,9 @@ def calibrate(stream):
     return threshold
 
 
-def wait_for_utterance(stream, threshold, deadline=None):
-    """Record one spoken phrase. With a deadline, gives up (returns None) if you haven't started talking by then."""
+def wait_for_utterance(stream, threshold, deadline=None, allow_notice=False):
+    """Record one spoken phrase. With a deadline, gives up (returns None) if you haven't started talking by then.
+    With allow_notice, returns NOTICE when a reminder is waiting and you aren't in the middle of speaking."""
     preroll = deque(maxlen=10)  # keeps the ~0.3 s before speech starts
     frames = []
     speaking = False
@@ -219,6 +237,8 @@ def wait_for_utterance(stream, threshold, deadline=None):
                 silence = 0
             elif deadline and time.monotonic() > deadline:
                 return None
+            elif allow_notice and not notifications.empty():
+                return NOTICE
         else:
             frames.append(block)
             silence = silence + 1 if level < threshold else 0
@@ -359,8 +379,13 @@ def follow_up(stream, threshold):
 
 
 def listen_once(stream, threshold):
-    """Wait for one thing you say. Acts on it if it starts with his name, otherwise ignores it."""
-    audio = wait_for_utterance(stream, threshold)
+    """Wait for one thing you say. Acts on it if it starts with his name, otherwise ignores it.
+    While waiting, he also speaks any reminder that comes due."""
+    audio = wait_for_utterance(stream, threshold, allow_notice=True)
+    if audio is NOTICE:
+        deliver_notifications(stream)
+        body.set_state("idle")
+        return
     if audio is None:
         body.set_state("idle")
         return

@@ -1,3 +1,9 @@
+import queue
+
+# Skills put messages here (like a reminder that just came due). jarvis.py speaks them when he is idle.
+notifications = queue.Queue()
+
+
 def tool(name, description, params=None, optional=(), enums=None):
     """Build the schema the model sees.
     params = {argument name: description}, enums = {argument name: [allowed values]}."""
