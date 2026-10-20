@@ -1,6 +1,7 @@
 import difflib
 import os
 import re
+import signal
 import threading
 import time
 import traceback
@@ -13,8 +14,6 @@ from kokoro_onnx import Kokoro
 from openai import OpenAI
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from body import Body
-from actions import SYSTEM_HINTS
-import signal
 
 SAMPLE_RATE = 16000
 BLOCK = 512                # 32 ms per read
@@ -27,6 +26,7 @@ WAKE_CUTOFF = 0.65
 FOLLOWUP_SECONDS = 6       # how long he keeps listening after he answers
 MAX_HISTORY = 8            # messages remembered during a conversation (4 exchanges)
 SHOW_IGNORED = True        # flash the panel red when he hears speech without his name
+BARGE_IN = True            # listen for "stop" while he is thinking or talking
 
 VOICE = "bm_fable"
 VOICE_SPEED = 1.0          # try 0.9 for a slower, calmer delivery
@@ -35,13 +35,22 @@ VOICE_SPEED = 1.0          # try 0.9 for a slower, calmer delivery
 ERROR_HINTS = ("couldn't", "can't", "failed", "unknown tool", "isn't running", "don't see",
                "out of date", "only open", "which tabs", "not allowed")
 
+# Saying one of these (alone, or with "Jarvis" or "it") stops him
+STOP_TRIGGERS = {"stop", "cancel", "abort", "enough", "quiet", "nevermind"}
+STOP_FILLER = {"it", "that", "this", "now", "please", "sir", "right", "oh", "just", "all",
+               "everything", "talking", "never", "mind", "be", "okay", "ok"}
+
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
 body = Body()              # the floating panel
 stt = None                 # loaded in the background thread, so the panel shows up at once
 tts = None
 history = []               # the current conversation, cleared when the follow-up window closes
+cancel = threading.Event() # set when you say stop (or double-click the panel)
+active_monitor = None      # the listener that watches for "stop" while he is busy
 
 tools = TOOL_SCHEMAS       # defined in actions.py and the skills folder, add new abilities there
+
+from actions import SYSTEM_HINTS   # every skill adds its own line about when to use its tools
 
 SYSTEM = (
     "You are Jarvis, a personal AI assistant living on the user's Windows PC, "
@@ -78,19 +87,98 @@ def looks_like_error(text):
     return any(hint in lowered for hint in ERROR_HINTS)
 
 
+# ------------------------------------------------------------------ stop
+
+def is_stop(text):
+    """True when the whole sentence is just a stop request: 'stop', 'Jarvis, stop it', 'never mind'..."""
+    words = [w for w in re.findall(r"[a-z']+", text.lower())
+             if difflib.SequenceMatcher(None, w, WAKE_WORD).ratio() < WAKE_CUTOFF]   # drop "Jarvis"
+    if not words or len(words) > 4:
+        return False
+    has_trigger = any(w in STOP_TRIGGERS for w in words) or "never mind" in " ".join(words)
+    return has_trigger and all(w in STOP_TRIGGERS or w in STOP_FILLER for w in words)
+
+
+def request_stop():
+    """Cut his voice off and tell everything that is running to give up."""
+    cancel.set()
+    try:
+        sd.stop()
+    except Exception:
+        pass
+
+
+class StopMonitor(threading.Thread):
+    """While he is thinking or talking, listens to the mic and reacts to a short 'stop'.
+    It is the only thing reading the mic during that time, so the main loop must not read until stop() returns."""
+
+    def __init__(self, stream, threshold):
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.threshold = threshold
+        self.running = True
+        self.current_text = ""       # what he is saying right now, so his own echo isn't mistaken for you
+
+    def stop(self):
+        self.running = False
+        self.join(timeout=3)
+
+    def heard_stop(self, audio):
+        segments, _ = stt.transcribe(audio, language="en", vad_filter=True, beam_size=1)
+        text = " ".join(s.text for s in segments).strip()
+        if not text or not is_stop(text):
+            return False
+        mine = self.current_text.lower()
+        spoken = set(re.findall(r"[a-z']+", text.lower())) & STOP_TRIGGERS
+        if any(word in mine for word in spoken):          # he said that word himself, it's just his echo
+            return False
+        print(f"(stop heard: {text})")
+        return True
+
+    def run(self):
+        preroll = deque(maxlen=6)
+        frames, talking, silence = [], False, 0
+        try:
+            while self.running:
+                block = self.stream.read(BLOCK)[0][:, 0].copy()
+                level = rms(block)
+                if not talking:
+                    preroll.append(block)
+                    if level > self.threshold:
+                        talking, frames, silence = True, list(preroll), 0
+                    continue
+                frames.append(block)
+                silence = silence + 1 if level < self.threshold else 0
+                if silence >= 12 or len(frames) >= 62:      # ~0.4 s of quiet, or ~2 s of speech
+                    audio = np.concatenate(frames)
+                    talking, frames, silence = False, [], 0
+                    if len(audio) >= BLOCK * 6 and self.heard_stop(audio):
+                        request_stop()
+                        return
+        except Exception:
+            pass        # the microphone failed; the main loop will notice and recover
+
+
+# ---------------------------------------------------------------- speaking
+
 def speak(text, stream, error=False):
-    """Say the text out loud, then throw away anything the mic heard meanwhile.
-    With error=True the panel shows red while he speaks, then fades back to idle."""
+    """Say the text out loud. With error=True the panel shows red while he speaks, then fades back to idle."""
     print("Jarvis:", text)
+    monitor = active_monitor
     samples, rate = tts.create(text, voice=VOICE, speed=VOICE_SPEED, lang="en-gb")
     body.set_jarvis(text, duration=len(samples) / rate)   # text types out as he speaks
     body.set_state("error" if error else "speaking")
+    if monitor:
+        monitor.current_text = text
     sd.play(samples, rate)
-    sd.wait()
+    sd.wait()                # returns early if you say stop
+    if monitor:
+        monitor.current_text = ""
     time.sleep(0.3)  # let the room echo die down
-    waiting = stream.read_available
-    if waiting:
-        stream.read(waiting)
+    if monitor is None:      # with a stop monitor running, run_command clears the mic afterwards
+        waiting = stream.read_available
+        if waiting:
+            stream.read(waiting)
     if error:
         body.flash("error", 2.5)
     else:
@@ -167,6 +255,12 @@ def remember(user_text, reply):
 def handle(text, stream):
     body.set_state("thinking")
 
+    # "Jarvis, stop" when nothing is running
+    if is_stop(text):
+        resolve_pending("stop")        # also ends any open question
+        speak("Standing by, sir.", stream)
+        return
+
     # Shutdown requests, and the yes or no to "shall I close them all?", are handled here, not by the model
     answer = resolve_pending(text)
     if answer:
@@ -189,33 +283,64 @@ def handle(text, stream):
         print("LM Studio error:", e)
         speak("I can't reach my brain, sir. Is LM Studio's server running?", stream, error=True)
         return
+
+    if cancel.is_set():            # you said stop while he was thinking: do nothing
+        return
+
     msg = resp.choices[0].message
     if not msg.tool_calls:
         reply = msg.content or "I'm not sure how to do that, sir."
         speak(reply, stream)
-        remember(text, reply)
+        if not cancel.is_set():
+            remember(text, reply)
         return
+
     results = []
     for call in msg.tool_calls:
+        if cancel.is_set():        # stop: skip the remaining actions
+            break
         result = run_tool(call.function.name, call.function.arguments)
         results.append(result)
         speak(result, stream, error=looks_like_error(result))
-    if QUIT.is_set():          # he has said goodbye, now actually leave
+    if QUIT.is_set():              # he has said goodbye, now actually leave
         shutdown()
-    remember(text, " ".join(results))
+    if not cancel.is_set():
+        remember(text, " ".join(results))
 
 
-def run_command(command, stream):
+def run_command(command, stream, threshold):
+    global active_monitor
     print("You said:", command)
     body.set_user(command)
-    body.set_jarvis("")        # clear the old reply while he thinks
-    handle(command, stream)
+    body.set_jarvis("")            # clear the old reply while he thinks
+    cancel.clear()
+
+    monitor = StopMonitor(stream, threshold) if BARGE_IN else None
+    active_monitor = monitor
+    if monitor:
+        monitor.start()
+    try:
+        handle(command, stream)
+    finally:
+        active_monitor = None
+        if monitor:
+            monitor.stop()
+        waiting = stream.read_available      # drop whatever the mic caught of his own voice
+        if waiting:
+            stream.read(waiting)
+        if cancel.is_set():
+            history.clear()
+            resolve_pending("stop")          # forget any open question
+            body.set_jarvis("Stopped.")
+            body.flash("ignored", 1.5)
 
 
 def follow_up(stream, threshold):
     """After he answers, keep listening for a few seconds. No wake word needed."""
     deadline = time.monotonic() + FOLLOWUP_SECONDS
     while True:
+        if cancel.is_set():             # you stopped him: no follow-up window
+            break
         body.set_state("listening")     # cyan: he's waiting for you
         audio = wait_for_utterance(stream, threshold, deadline)
         text = transcribe(audio) if audio is not None else ""
@@ -223,7 +348,7 @@ def follow_up(stream, threshold):
             heard, rest = split_wake_word(text)
             command = rest if heard else text
             if command:
-                run_command(command, stream)
+                run_command(command, stream, threshold)
             else:
                 speak("Yes, sir?", stream)       # you only said "Jarvis"
             deadline = time.monotonic() + FOLLOWUP_SECONDS
@@ -256,6 +381,7 @@ def listen_once(stream, threshold):
         return
 
     if not command:
+        cancel.clear()
         speak("Yes, sir?", stream)
         audio = wait_for_utterance(stream, threshold)
         if audio is None:
@@ -266,7 +392,10 @@ def listen_once(stream, threshold):
             body.set_state("idle")
             return
 
-    run_command(command, stream)
+    run_command(command, stream, threshold)
+    if cancel.is_set():
+        body.set_state("idle")
+        return
     follow_up(stream, threshold)
 
 
@@ -318,7 +447,7 @@ def jarvis_loop():
                     else:
                         speak("Microphone reconnected, sir.", stream)
                     attempts = 0
-                    print("Jarvis is listening. Say 'Jarvis ...' (or right-click the panel to quit)")
+                    print("Jarvis is listening. Say 'Jarvis ...' (double-click the panel to stop him, right-click to quit)")
                     while True:
                         try:
                             listen_once(stream, threshold)
@@ -336,7 +465,8 @@ def jarvis_loop():
         body.set_jarvis(f"I couldn't start, sir: {e}")
 
 
-signal.signal(signal.SIGINT, lambda signum, frame: shutdown())   # Ctrl+C now quits cleanly, like the voice command
+body.on_stop = request_stop                                       # double-click the panel to stop him
+signal.signal(signal.SIGINT, lambda signum, frame: shutdown())    # Ctrl+C quits cleanly, like the voice command
 
 threading.Thread(target=jarvis_loop, daemon=True).start()
 body.run()   # the panel owns the main thread; right-click it to quit

@@ -170,6 +170,8 @@ class Body:
         self.canvas.bind("<B1-Motion>", self._drag_move)
         self.canvas.bind("<Button-3>", lambda e: self.root.destroy())   # right-click to quit
         self.canvas.bind("<MouseWheel>", self._wheel)                    # scroll long replies
+        self.on_stop = None                                              # set by jarvis.py
+        self.canvas.bind("<Double-Button-1>", lambda e: self.on_stop and self.on_stop())   # double-click = stop
 
     def _drag_start(self, e):
         self._dx = e.x_root - self.px
