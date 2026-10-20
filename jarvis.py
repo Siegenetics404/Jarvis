@@ -39,7 +39,7 @@ stt = None                 # loaded in the background thread, so the panel shows
 tts = None
 history = []               # the current conversation, cleared when the follow-up window closes
 
-tools = TOOL_SCHEMAS       # defined in actions.py, add new abilities there
+tools = TOOL_SCHEMAS       # defined in actions.py and the skills folder, add new abilities there
 
 SYSTEM = (
     "You are Jarvis, a personal AI assistant living on the user's Windows PC, "
@@ -50,7 +50,9 @@ SYSTEM = (
     "open_project to open a coding project, get_time for the time or date, "
     "open_website to open a website (pass its full https address), "
     "search_web to search the internet or look something up online, "
-    "play_youtube to play a song or video (the song name is the query), "
+    "play_spotify only when the user says Spotify, "
+    "play_youtube to play a song or video on YouTube or when no music service is named, "
+    "media_control to pause, resume, skip or go back a track, "
     "close_tabs to close browser tabs or websites, once for each tab "
     "(pass a few words from the tab's title or site), "
     "count_tabs to say how many tabs are open, "
@@ -275,6 +277,25 @@ def report_error(e):
     body.flash("error", 5)
 
 
+def mic_lost(e, attempts):
+    """The microphone vanished (unplugged, Bluetooth switched mode, Windows changed the default, sleep).
+    Wait a little, make Windows' device list refresh, and let the caller try again."""
+    print(f"[mic] lost ({str(e).splitlines()[0][:90]}). Reconnecting, attempt {attempts}...")
+    history.clear()
+    body.set_state("error")
+    body.set_jarvis("Microphone lost. Reconnecting...")
+    try:
+        sd.stop()
+    except Exception:
+        pass
+    time.sleep(min(2 * attempts, 10))       # 2 s, 4 s, 6 s ... up to 10 s between tries
+    try:
+        sd._terminate()
+        sd._initialize()                    # makes PortAudio look at the devices again
+    except Exception as err:
+        print("[mic] couldn't refresh the device list:", err)
+
+
 def jarvis_loop():
     global stt, tts
     try:
@@ -283,17 +304,31 @@ def jarvis_loop():
         stt = WhisperModel("base.en", device="cpu", compute_type="int8")
         tts = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
 
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=BLOCK) as stream:
-            body.set_jarvis("Calibrating... stay quiet for a second.")
-            threshold = calibrate(stream)
-            speak("Good evening, sir. All systems are online.", stream)
-            print("Jarvis is listening. Say 'Jarvis ...' (or right-click the panel to quit)")
-            while True:
-                try:
-                    listen_once(stream, threshold)
-                except Exception as e:
-                    report_error(e)
-                    time.sleep(1)       # avoid a tight loop if the same thing keeps failing
+        first_start = True
+        attempts = 0
+        while True:                         # outer loop: reopen the microphone whenever it drops
+            try:
+                with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=BLOCK) as stream:
+                    body.set_jarvis("Calibrating... stay quiet for a second.")
+                    threshold = calibrate(stream)
+                    if first_start:
+                        speak("Good evening, sir. All systems are online.", stream)
+                        first_start = False
+                    else:
+                        speak("Microphone reconnected, sir.", stream)
+                    attempts = 0
+                    print("Jarvis is listening. Say 'Jarvis ...' (or right-click the panel to quit)")
+                    while True:
+                        try:
+                            listen_once(stream, threshold)
+                        except sd.PortAudioError:
+                            raise           # the microphone itself failed: leave, so it gets reopened
+                        except Exception as e:
+                            report_error(e)
+                            time.sleep(1)   # avoid a tight loop if the same thing keeps failing
+            except sd.PortAudioError as e:
+                attempts += 1
+                mic_lost(e, attempts)
     except Exception as e:
         traceback.print_exc()
         body.set_state("error")

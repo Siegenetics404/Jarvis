@@ -1,4 +1,5 @@
 import difflib
+import importlib
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
 import browser_bridge as bridge
+from skills import tool as _tool
 
 # Set when the user tells Jarvis to shut himself down. jarvis.py checks it after he says goodbye.
 QUIT = threading.Event()
@@ -404,24 +406,7 @@ def resolve_pending(text):
     return None
 
 
-# ------------------------------------------- tool registry (add new tools here)
-
-def _tool(name, description, params=None, optional=()):
-    """Build the schema the model sees. params = {arg_name: description}."""
-    params = params or {}
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": {k: {"type": "string", "description": v} for k, v in params.items()},
-                "required": [k for k in params if k not in optional],
-            },
-        },
-    }
-
+# ------------------------------------------- tool registry (built-in tools)
 
 TOOL_SCHEMAS = [
     _tool("open_app", "Open an application installed on the computer",
@@ -436,7 +421,7 @@ TOOL_SCHEMAS = [
     _tool("search_web", "Search the internet in the browser. Use this when the user asks to search, google, or look something up online.",
           {"query": "What to search for"}),
     _tool("play_youtube", "Find a song or video on YouTube and play it right away. Use this when the user asks to play "
-                          "a song, music, or video, with or without saying YouTube.",
+                          "a song, music, or video on YouTube, or when no music service is named.",
           {"query": "The song or video name, plus the artist if the user said one, e.g. odoriko"}),
     _tool("close_tabs", "Close browser tabs (websites) whose title or address contains the given words. Use this for "
                         "'close youtube', 'close the odoriko tab', 'close the extension tab'. To close several "
@@ -465,6 +450,24 @@ TOOLS = {
     "count_tabs": count_tabs,
     "quit_jarvis": quit_jarvis,
 }
+
+
+def _load_skills():
+    """Every .py file in the skills folder adds its own tools. Delete a file to remove that ability."""
+    folder = Path(__file__).parent / "skills"
+    for file in sorted(folder.glob("*.py")):
+        if file.name.startswith("_"):
+            continue
+        try:
+            module = importlib.import_module(f"skills.{file.stem}")
+            TOOL_SCHEMAS.extend(module.SCHEMAS)
+            TOOLS.update(module.TOOLS)
+            print(f"[skills] loaded {file.stem}")
+        except Exception as e:
+            print(f"[skills] could not load {file.name}: {e}")
+
+
+_load_skills()
 
 
 def run_tool(name, arguments_json):
