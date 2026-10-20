@@ -114,3 +114,6 @@ TOOLS = {
     "play_spotify": play_spotify,
     "media_control": media_control,
 }
+
+HINT = ("Spotify: use play_spotify only when the user says Spotify, and media_control to pause, resume, "
+        "skip a track or go back a track.")

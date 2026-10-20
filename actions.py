@@ -452,6 +452,9 @@ TOOLS = {
 }
 
 
+SYSTEM_HINTS = []      # each skill can add a line telling the model when to use its tools
+
+
 def _load_skills():
     """Every .py file in the skills folder adds its own tools. Delete a file to remove that ability."""
     folder = Path(__file__).parent / "skills"
@@ -462,6 +465,9 @@ def _load_skills():
             module = importlib.import_module(f"skills.{file.stem}")
             TOOL_SCHEMAS.extend(module.SCHEMAS)
             TOOLS.update(module.TOOLS)
+            hint = getattr(module, "HINT", "")
+            if hint:
+                SYSTEM_HINTS.append(hint)
             print(f"[skills] loaded {file.stem}")
         except Exception as e:
             print(f"[skills] could not load {file.name}: {e}")

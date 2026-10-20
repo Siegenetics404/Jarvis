@@ -13,6 +13,8 @@ from kokoro_onnx import Kokoro
 from openai import OpenAI
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from body import Body
+from actions import SYSTEM_HINTS
+import signal
 
 SAMPLE_RATE = 16000
 BLOCK = 512                # 32 ms per read
@@ -50,14 +52,13 @@ SYSTEM = (
     "open_project to open a coding project, get_time for the time or date, "
     "open_website to open a website (pass its full https address), "
     "search_web to search the internet or look something up online, "
-    "play_spotify only when the user says Spotify, "
     "play_youtube to play a song or video on YouTube or when no music service is named, "
-    "media_control to pause, resume, skip or go back a track, "
     "close_tabs to close browser tabs or websites, once for each tab "
     "(pass a few words from the tab's title or site), "
     "count_tabs to say how many tabs are open, "
     "quit_jarvis when the user tells YOU to shut down, quit, exit, turn off, or go to sleep "
     "(it only closes you, never the computer or other apps). "
+    + " ".join(SYSTEM_HINTS) + " "
     "Call one tool per action and pass only the bare app or project name, without words like 'the app' or 'please'. "
     "If no tool fits, just answer or chat naturally. Never say you can't do something a tool can do. "
     "Only offer or promise things your tools can actually do. "
@@ -334,6 +335,8 @@ def jarvis_loop():
         body.set_state("error")
         body.set_jarvis(f"I couldn't start, sir: {e}")
 
+
+signal.signal(signal.SIGINT, lambda signum, frame: shutdown())   # Ctrl+C now quits cleanly, like the voice command
 
 threading.Thread(target=jarvis_loop, daemon=True).start()
 body.run()   # the panel owns the main thread; right-click it to quit
