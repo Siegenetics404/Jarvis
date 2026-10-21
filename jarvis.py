@@ -30,6 +30,12 @@ MAX_HISTORY = 8            # messages remembered during a conversation (4 exchan
 SHOW_IGNORED = True        # flash the panel red when he hears speech without his name
 BARGE_IN = True            # listen for "stop" while he is thinking or talking
 
+ALARM_ROUNDS = 36          # each round is about 5 seconds, so he rings for about 3 minutes before giving up
+# What you can say while an alarm rings. It has to be a short sentence made only of these words.
+ALARM_DISMISS = {"stop", "dismiss", "off", "awake", "up", "enough", "quiet", "cancel"}
+ALARM_FILLER = {"i", "i'm", "im", "am", "it", "the", "alarm", "please", "thanks", "thank", "you",
+                "okay", "ok", "alright", "turn", "now", "sir"}
+
 VOICE = "bm_fable"
 VOICE_SPEED = 1.0          # try 0.9 for a slower, calmer delivery
 
@@ -42,7 +48,7 @@ STOP_TRIGGERS = {"stop", "cancel", "abort", "enough", "quiet", "nevermind"}
 STOP_FILLER = {"it", "that", "this", "now", "please", "sir", "right", "oh", "just", "all",
                "everything", "talking", "never", "mind", "be", "okay", "ok"}
 
-NOTICE = object()          # returned by wait_for_utterance when a reminder is waiting to be spoken
+NOTICE = object()          # returned by wait_for_utterance when a reminder or alarm is waiting
 
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
 body = Body()              # the floating panel
@@ -189,24 +195,120 @@ def speak(text, stream, error=False):
         body.set_state("idle")
 
 
-def deliver_notifications(stream):
-    """Speak anything the skills have queued, like a reminder that just came due. Two beeps first."""
+# ------------------------------------------------------ reminders and alarms
+
+def alarm_tone(level):
+    """A short rising three-beep pattern, repeated. level (0 to 1) is how loud."""
+    rate = 44100
+
+    def beep(freq, seconds):
+        t = np.linspace(0, seconds, int(rate * seconds), endpoint=False)
+        wave = np.sin(2 * np.pi * freq * t) + 0.4 * np.sin(2 * np.pi * 2 * freq * t)
+        fade = np.minimum(1.0, np.minimum(t, seconds - t) / 0.01)      # no clicks at the edges
+        return (wave * fade * 0.6).astype("float32")
+
+    gap = np.zeros(int(rate * 0.08), dtype="float32")
+    pause = np.zeros(int(rate * 0.25), dtype="float32")
+    pattern = np.concatenate([beep(988, 0.14), gap, beep(988, 0.14), gap, beep(1319, 0.28), pause])
+    return (np.concatenate([pattern, pattern, pattern]) * level).astype("float32"), rate
+
+
+def alarm_answer(text):
+    """What you said while the alarm rings: ('dismiss', None), ('snooze', minutes) or (None, None)."""
+    lowered = text.lower()
+    words = [w for w in re.findall(r"[a-z']+", lowered)
+             if difflib.SequenceMatcher(None, w, WAKE_WORD).ratio() < WAKE_CUTOFF]
+    if "snooze" in words or ("more" in words and ("minute" in words or "minutes" in words)):
+        number = re.search(r"\d+", lowered)
+        spelled = {"five": 5, "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30}
+        minutes = int(number.group()) if number else next((v for k, v in spelled.items() if k in words), 5)
+        return "snooze", max(1, min(minutes, 120))
+    if (words and len(words) <= 5 and any(w in ALARM_DISMISS for w in words)
+            and all(w in ALARM_DISMISS or w in ALARM_FILLER for w in words)):
+        return "dismiss", None
+    return None, None
+
+
+def ring_alarm(stream, threshold, item):
+    """Ring until you dismiss or snooze it (by voice, or by double-clicking the panel). Louder every round."""
+    label = (item.get("message") or "time to wake up").rstrip(".!?")
+    print(f"[alarm] ringing: {label}")
+    cancel.clear()
+    try:                                  # an alarm you can't hear is useless, so undo a mute (the level stays as it is)
+        from skills.pc_control import volume
+        volume("unmute")
+    except Exception:
+        pass
+
+    body.set_user("Alarm")
+    body.set_jarvis(f"{label}. Say stop to dismiss it, or snooze 5 minutes. Or double-click me.")
+    outcome = "missed"
+    snooze_minutes = 0
+
+    for n in range(ALARM_ROUNDS):
+        if cancel.is_set():
+            outcome = "dismissed"
+            break
+        body.set_state("alarm")
+        tone, rate = alarm_tone(min(1.0, 0.35 + 0.07 * n))        # starts soft, gets louder
+        sd.play(tone, rate)
+        sd.wait()
+        if cancel.is_set():
+            outcome = "dismissed"
+            break
+        if n % 4 == 1:                                            # now and then he says it out loud too
+            speak(f"Sir, {label}.", stream)
+            body.set_state("alarm")
+            if cancel.is_set():
+                outcome = "dismissed"
+                break
+        waiting = stream.read_available                           # forget the echo of the alarm itself
+        if waiting:
+            stream.read(waiting)
+        audio = wait_for_utterance(stream, threshold, deadline=time.monotonic() + 2.5)
+        if audio is None:
+            continue
+        action, minutes = alarm_answer(transcribe(audio))
+        if action == "dismiss":
+            outcome = "dismissed"
+            break
+        if action == "snooze":
+            item["snooze"](minutes)
+            outcome, snooze_minutes = "snoozed", minutes
+            break
+
+    cancel.clear()
+    body.set_state("idle")
+    if outcome == "dismissed":
+        speak("Alarm dismissed. Welcome back, sir.", stream)
+    elif outcome == "snoozed":
+        speak(f"Snoozed for {snooze_minutes} minutes, sir.", stream)
+    else:
+        body.set_jarvis(f"Missed alarm: {label}")
+        body.flash("error", 8)
+
+
+def deliver_notifications(stream, threshold):
+    """Handle anything the skills have queued: alarms ring, reminders are spoken after two beeps."""
     while not notifications.empty():
-        message = notifications.get()
+        item = notifications.get()
+        if isinstance(item, dict) and item.get("kind") == "alarm":
+            ring_alarm(stream, threshold, item)
+            continue
         try:
             winsound.Beep(880, 150)
             winsound.Beep(1175, 200)
         except Exception:
             pass
         body.set_user("Reminder")
-        speak(message, stream)
+        speak(item, stream)
 
 
 def shutdown():
     """Exit the whole program, panel included, like pressing Ctrl+C."""
     body.set_state("idle")
     print("Jarvis offline.", flush=True)
-    os._exit(0)     # a hard exit is fine: reminders and notes are saved the moment they are made
+    os._exit(0)     # a hard exit is fine: reminders, alarms and notes are saved the moment they are made
 
 
 def calibrate(stream):
@@ -220,7 +322,7 @@ def calibrate(stream):
 
 def wait_for_utterance(stream, threshold, deadline=None, allow_notice=False):
     """Record one spoken phrase. With a deadline, gives up (returns None) if you haven't started talking by then.
-    With allow_notice, returns NOTICE when a reminder is waiting and you aren't in the middle of speaking."""
+    With allow_notice, returns NOTICE when a reminder or alarm is waiting and you aren't in the middle of speaking."""
     preroll = deque(maxlen=10)  # keeps the ~0.3 s before speech starts
     frames = []
     speaking = False
@@ -380,10 +482,10 @@ def follow_up(stream, threshold):
 
 def listen_once(stream, threshold):
     """Wait for one thing you say. Acts on it if it starts with his name, otherwise ignores it.
-    While waiting, he also speaks any reminder that comes due."""
+    While waiting, he also handles any reminder or alarm that comes due."""
     audio = wait_for_utterance(stream, threshold, allow_notice=True)
     if audio is NOTICE:
-        deliver_notifications(stream)
+        deliver_notifications(stream, threshold)
         body.set_state("idle")
         return
     if audio is None:
@@ -472,7 +574,7 @@ def jarvis_loop():
                     else:
                         speak("Microphone reconnected, sir.", stream)
                     attempts = 0
-                    print("Jarvis is listening. Say 'Jarvis ...' (double-click the panel to stop him, right-click to quit)")
+                    print("Jarvis is listening. Say 'Jarvis ...' (double-click the panel to stop him, right-click for the menu)")
                     while True:
                         try:
                             listen_once(stream, threshold)
@@ -494,4 +596,4 @@ body.on_stop = request_stop                                       # double-click
 signal.signal(signal.SIGINT, lambda signum, frame: shutdown())    # Ctrl+C quits cleanly, like the voice command
 
 threading.Thread(target=jarvis_loop, daemon=True).start()
-body.run()   # the panel owns the main thread; right-click it to quit
+body.run()   # the panel owns the main thread; right-click it for the menu

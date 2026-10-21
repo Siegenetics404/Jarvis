@@ -41,6 +41,7 @@ STATES = {
     "speaking":  dict(color=(124, 255, 178), rot=0.012, spawn=0.30, amp=0.07, freq=6.0),
     "ignored":   dict(color=(176, 84, 96), rot=0.003, spawn=0.02, amp=0.00, freq=1.0),
     "error":     dict(color=(255, 72, 72), rot=0.020, spawn=0.40, amp=0.05, freq=5.0),
+    "alarm":     dict(color=(255, 140, 0), rot=0.050, spawn=0.70, amp=0.09, freq=9.0),
 }
 
 # A color theme only changes the calm states. Thinking, ignored and error keep their meaning.
@@ -563,7 +564,8 @@ class Body:
             self._bubble_dismissed = False
         if talking and self.jarvis.text:
             self.bubble_until = now + self.s["bubble_seconds"]       # keeps it open while he talks, then lingers
-        if self.minimized and talking and self.s["talk_mode"] == "open" and not self._pop_blocked:
+        if (self.minimized and not self._pop_blocked
+                and ((talking and self.s["talk_mode"] == "open") or self.state == "alarm")):
             self._set_minimized(False, by_user=False)
         elif (not self.minimized and self._auto_opened and self.s["tuck_seconds"] > 0
                 and now - self.last_active > self.s["tuck_seconds"]):

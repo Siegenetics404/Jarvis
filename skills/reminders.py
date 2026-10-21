@@ -1,5 +1,7 @@
-"""Notes and reminders. They are stored as plain text files in the data folder (which is git-ignored),
-so they survive restarts. When a reminder comes due, Jarvis speaks it as soon as he is idle."""
+"""Notes, reminders and alarms. They are stored as plain text files in the data folder (which is git-ignored),
+so they survive restarts. A reminder is spoken once when it comes due. An alarm rings until it is dismissed,
+and keeps Windows from going to sleep while it is waiting."""
+import ctypes
 import json
 import re
 import threading
@@ -12,11 +14,21 @@ from skills import tool, notifications
 DATA = Path(__file__).resolve().parent.parent / "data"
 NOTES_FILE = DATA / "notes.json"
 REMINDERS_FILE = DATA / "reminders.json"
-MAX_MINUTES = 7 * 24 * 60          # reminders can be up to a week away
+MAX_MINUTES = 7 * 24 * 60          # reminders and alarms can be up to a week away
 LATE_AFTER = 120                   # a reminder this many seconds late is announced with its original time
+LATE_ALARM = 600                   # an alarm more than 10 minutes late is announced as missed, not rung
+AWAKE_AFTER_RING = 300             # keep the PC awake this long after an alarm goes off
+ALARM_DEFAULT = "time to wake up"
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+_kernel32 = ctypes.WinDLL("kernel32")
+_kernel32.SetThreadExecutionState.argtypes = [ctypes.c_ulong]
+_kernel32.SetThreadExecutionState.restype = ctypes.c_ulong
 
 _lock = threading.Lock()
-_last_fired = None                 # message of the most recent reminder, for "snooze"
+_last_fired = None                 # message and kind of the most recent reminder or alarm, for "snooze"
+_last_kind = "reminder"
 
 _FILLER = {"the", "a", "an", "my", "note", "notes", "about", "what", "did", "i", "say", "said",
            "reminder", "reminders", "that", "to", "me", "of", "for", "on", "is", "was"}
@@ -136,25 +148,48 @@ def _clean_message(text):
     return re.sub(r"^(please\s+)?(remind me\s+)?(to|that)\s+", "", text, flags=re.I)
 
 
-# --------------------------------------------------------------- reminders
+def _kind_of(reminder):
+    return reminder.get("kind", "reminder")         # older saved reminders have no kind
 
-def _add(message, due):
+
+def _keep_awake(on):
+    """While an alarm is waiting, tell Windows not to go to sleep (the screen may still turn off)."""
+    try:
+        _kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------- reminders and alarms
+
+def _add(message, due, kind="reminder"):
     with _lock:
         rid = max((r["id"] for r in _reminders), default=0) + 1
-        _reminders.append({"id": rid, "message": message, "due": due, "created": time.time()})
+        _reminders.append({"id": rid, "message": message, "due": due, "created": time.time(), "kind": kind})
         _save(REMINDERS_FILE, _reminders)
 
 
 def _announcement(reminder, late):
     message = _spoken(reminder["message"]).rstrip(".!?")
+    if _kind_of(reminder) == "alarm":
+        return f"Sir, you missed an alarm at {_clock(reminder['due'])}: {message}."
     if late > LATE_AFTER:
         return f"Reminder, sir, from {_clock(reminder['due'])}: {message}."
     return f"Reminder, sir: {message}."
 
 
+def _alarm_item(reminder):
+    """What jarvis.py gets for an alarm: the message, and a way to snooze it."""
+    message = reminder["message"]
+    return {"kind": "alarm", "message": message,
+            "snooze": lambda minutes, text=message: _add(text, time.time() + minutes * 60, "alarm")}
+
+
 def _scheduler():
     """Checks once a second, using the real clock, so it also works after the laptop sleeps."""
-    global _last_fired
+    global _last_fired, _last_kind
+    awake_held = False
+    awake_until = 0.0
     while True:
         time.sleep(1)
         now = time.time()
@@ -164,28 +199,45 @@ def _scheduler():
                 for r in due:
                     _reminders.remove(r)
                 _save(REMINDERS_FILE, _reminders)
+            has_alarm = any(_kind_of(r) == "alarm" for r in _reminders)
+        if any(_kind_of(r) == "alarm" for r in due):
+            awake_until = now + AWAKE_AFTER_RING
+        want_awake = has_alarm or now < awake_until
+        if want_awake != awake_held:
+            _keep_awake(want_awake)
+            awake_held = want_awake
         for r in sorted(due, key=lambda item: item["due"]):
-            _last_fired = r["message"]
-            notifications.put(_announcement(r, now - r["due"]))
+            _last_fired, _last_kind = r["message"], _kind_of(r)
+            late = now - r["due"]
+            if _kind_of(r) == "alarm" and late <= LATE_ALARM:
+                notifications.put(_alarm_item(r))
+            else:
+                notifications.put(_announcement(r, late))
 
 
 threading.Thread(target=_scheduler, daemon=True).start()
 
 
-def _set(message, minutes, at_time):
-    message = _clean_message(message) or "your time is up"
+def _set(message, minutes, at_time, kind):
+    message = _clean_message(message) or (ALARM_DEFAULT if kind == "alarm" else "your time is up")
     if (at_time or "").strip():
         due = _due_from_clock(at_time)
         if due is None:
             return "I didn't catch the time, sir. Say it like three thirty p.m."
-    else:
-        amount = _number(minutes)
-        if amount is None:
-            return "When should I remind you, sir?"
-        if amount < 0.1 or amount > MAX_MINUTES:
-            return "I can remind you from a few seconds up to a week away, sir."
-        due = time.time() + amount * 60
-    _add(message, due)
+        _add(message, due, kind)
+        if kind == "alarm":
+            return f"Alarm set {_when(due)}, sir."
+        return f"Alright, I'll remind you {_when(due)}: {_spoken(message)}."
+
+    amount = _number(minutes)
+    if amount is None:
+        return "How long should I wait, sir?" if kind == "alarm" else "When should I remind you, sir?"
+    if amount < 0.1 or amount > MAX_MINUTES:
+        return "I can set that from a few seconds up to a week away, sir."
+    due = time.time() + amount * 60
+    _add(message, due, kind)
+    if kind == "alarm":
+        return f"Alarm set for {_duration(amount)}, sir. I'll wake you at {_clock(due)}."
     return f"Alright, I'll remind you {_when(due)}: {_spoken(message)}."
 
 
@@ -193,54 +245,65 @@ def _list():
     with _lock:
         items = sorted(_reminders, key=lambda r: r["due"])
     if not items:
-        return "You have no reminders, sir."
-    parts = [f"{_spoken(r['message'])} {_when(r['due'])}" for r in items[:3]]
-    text = f"You have {_plural(len(items), 'reminder')}, sir: " + "; ".join(parts)
+        return "You have no reminders or alarms, sir."
+    parts = []
+    for r in items[:3]:
+        if _kind_of(r) == "alarm":
+            parts.append(f"an alarm {_when(r['due'])}")
+        else:
+            parts.append(f"{_spoken(r['message'])} {_when(r['due'])}")
+    text = "Coming up, sir: " + "; ".join(parts)
     if len(items) > 3:
         text += f"; and {len(items) - 3} more"
     return text + "."
 
 
-def _cancel(message):
-    words = _words(message)
+def _cancel(message, kind):
+    text = message or ""
+    want = "alarm" if (kind == "alarm" or re.search(r"\balarms?\b", text, re.I)) else None
+    words = _words(text)
     with _lock:
-        if not _reminders:
-            return "You have no reminders to cancel, sir."
+        pool = [r for r in _reminders if want is None or _kind_of(r) == want]
+        if not pool:
+            return "You have no alarms to cancel, sir." if want else "You have no reminders to cancel, sir."
         if words == ["all"]:
-            count = len(_reminders)
-            _reminders.clear()
-            _save(REMINDERS_FILE, _reminders)
-            return f"Cancelled all {_plural(count, 'reminder')}, sir."
-        if not words:
-            if len(_reminders) > 1:
-                return f"Which one, sir? You have {len(_reminders)} reminders."
-            hits = list(_reminders)
+            hits = list(pool)
+        elif not words:
+            if len(pool) > 1:
+                return f"Which one, sir? You have {len(pool)}."
+            hits = list(pool)
         else:
-            hits = [r for r in _reminders if all(w in _norm(r["message"]) for w in words)]
+            hits = [r for r in pool if all(w in _norm(r["message"]) for w in words)]
+            if not hits and want and len(pool) == 1:        # "cancel the nap alarm" with just one alarm set
+                hits = list(pool)
         if not hits:
-            return f"I don't see a reminder like that, sir."
+            return "I don't see one like that, sir."
         for r in hits:
             _reminders.remove(r)
         _save(REMINDERS_FILE, _reminders)
-    return f"Cancelled {_plural(len(hits), 'reminder')}, sir."
+    noun = "alarm" if all(_kind_of(r) == "alarm" for r in hits) else "reminder"
+    return f"Cancelled {_plural(len(hits), noun)}, sir."
 
 
 def _snooze(minutes):
     if _last_fired is None:
         return "I haven't reminded you of anything yet, sir."
     amount = _number(minutes) or 5
-    _add(_last_fired, time.time() + amount * 60)
+    _add(_last_fired, time.time() + amount * 60, _last_kind)
     return f"Snoozed for {_duration(amount)}, sir."
 
 
-def reminder(action, message="", minutes="", at_time=""):
+def reminder(action, message="", minutes="", at_time="", kind="reminder"):
     action = (action or "").strip().lower()
+    kind = (kind or "reminder").strip().lower()
+    if kind not in ("reminder", "alarm"):
+        kind = "reminder"
     if action == "set":
-        return _set(message, minutes, at_time)
+        return _set(message, minutes, at_time, kind)
     if action == "list":
         return _list()
     if action == "cancel":
-        return _cancel(message)
+        return _cancel(message, kind)
     if action == "snooze":
         return _snooze(minutes)
     return "I don't know that reminder command, sir."
@@ -303,22 +366,25 @@ def notes(action, text=""):
 
 # ---------------------------------------------------------------- registration
 
-HINT = ("Notes and reminders: use reminder to set, list, cancel or snooze reminders, and notes to save or look up notes. "
+HINT = ("Notes, reminders and alarms: use reminder to set, list, cancel or snooze them, and notes to save or look up notes. "
         "When the user says they will be busy for a while, like 'I have a break for the next 10 minutes' or "
-        "'I'm taking a bath for 5 minutes, remind me', set a reminder for those minutes with a message like "
-        "'your break is over' or 'your bath time is up'.")
+        "'I'm taking a bath for 5 minutes, remind me', set a reminder with those minutes and a message like "
+        "'your break is over'. When the user says they are taking a nap or going to sleep, or asks for an alarm "
+        "or to be woken up, set kind alarm with those minutes.")
 
 SCHEMAS = [
     tool("reminder",
-         "Set, list, cancel or snooze reminders. To set one, give a message and either the minutes from now or a clock time. "
-         "Use it for 'remind me in 20 minutes to ...', 'remind me at 3:30 to ...', and for 'I'm taking a break or a bath "
-         "for the next N minutes, remind me', where the message says the time is up.",
+         "Set, list, cancel or snooze reminders and alarms. To set one, give the minutes from now or a clock time. "
+         "A reminder is a polite spoken message, like 'remind me in 20 minutes to check the build' or 'I'm taking a "
+         "break for 10 minutes, remind me'. An alarm rings loudly until dismissed, for 'I'm taking a nap, set an "
+         "alarm for 30 minutes', 'wake me up at 6:30', or any request that says alarm.",
          {"action": "set, list, cancel or snooze",
-          "message": "What to remind about, like 'check the build', or 'your break is over'. For cancel: a word from the reminder, or 'all'.",
+          "message": "What to remind about, like 'check the build', or 'your break is over'. For cancel: a word from it, or 'all'.",
           "minutes": "How many minutes from now, as a number, like 20. Use 60 for an hour. For snooze: how long to snooze.",
-          "at_time": "A clock time instead of minutes, like 15:30 for 3:30 pm. Leave empty when using minutes."},
-         optional=("message", "minutes", "at_time"),
-         enums={"action": ["set", "list", "cancel", "snooze"]}),
+          "at_time": "A clock time instead of minutes, like 15:30 for 3:30 pm. Leave empty when using minutes.",
+          "kind": "reminder (default) or alarm"},
+         optional=("message", "minutes", "at_time", "kind"),
+         enums={"action": ["set", "list", "cancel", "snooze"], "kind": ["reminder", "alarm"]}),
     tool("notes",
          "Save or look up the user's notes. Use add for 'remember that ...' or 'note that ...', search for "
          "'what did I note about ...', and latest to read back the newest notes.",
