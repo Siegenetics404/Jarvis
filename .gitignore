@@ -17,3 +17,5 @@ __pycache__/
 Thumbs.db
 
 data/
+
+node_modules/
