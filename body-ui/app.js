@@ -227,6 +227,7 @@ let externalLevel = 0,
 function setState(name) {
   if (!STATES[name]) return;
   state = name;
+  stage.dataset.state = name;
   orb.setState(name);
   stateEl.textContent = name.toUpperCase();
   applyAccent();

@@ -78,6 +78,30 @@
         pointer-events: none;
       }
 
+      /* The glass: a bright rim that fades from white through a little pink and blue, like the orb's edge */
+      #card::before,
+      #bubble::before,
+      #menu::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        padding: 1.5px;
+        pointer-events: none;
+        background: linear-gradient(
+          135deg,
+          rgba(255, 255, 255, 0.85),
+          rgba(150, 210, 255, 0.22) 28%,
+          rgba(255, 130, 210, 0.3) 62%,
+          rgba(255, 255, 255, 0.55)
+        );
+        -webkit-mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor;
+        mask-composite: exclude;
+      }
+
       /* The full panel */
       #card {
         position: relative;
@@ -86,12 +110,24 @@
         display: flex;
         flex-direction: column;
         padding: 8px 16px 16px;
-        border-radius: 26px;
-        background: rgba(7, 11, 16, 0.8);
-        border: 1.5px solid rgba(var(--accent), 0.45);
+        border-radius: 28px;
+        background:
+          radial-gradient(
+            130% 70% at 12% -8%,
+            rgba(255, 255, 255, 0.2),
+            transparent 55%
+          ),
+          linear-gradient(
+            160deg,
+            rgba(255, 255, 255, 0.1),
+            rgba(255, 255, 255, 0.02) 40%,
+            rgba(var(--accent), 0.1)
+          ),
+          rgba(8, 14, 22, 0.58);
         box-shadow:
-          0 12px 40px rgba(0, 0, 0, 0.45),
-          0 0 28px rgba(var(--accent), 0.1);
+          inset 0 1px 0 rgba(255, 255, 255, 0.28),
+          inset 0 -24px 48px rgba(var(--accent), 0.08),
+          0 18px 44px rgba(0, 0, 0, 0.45);
         animation: cardIn 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
       }
       @keyframes cardIn {
@@ -100,6 +136,31 @@
           transform: translateY(10px) scale(0.97);
         }
       }
+
+      /* A glow in the state color that breathes. It only fades in and out, so it costs almost nothing. */
+      #card::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        pointer-events: none;
+        box-shadow: 0 0 44px rgba(var(--accent), 0.34);
+        opacity: 0.45;
+        animation: breathe 5s ease-in-out infinite;
+      }
+      @keyframes breathe {
+        50% {
+          opacity: 1;
+        }
+      }
+      #stage[data-state="speaking"] #card::after {
+        animation-duration: 1.6s;
+      }
+      #stage[data-state="alarm"] #card::after,
+      #stage[data-state="error"] #card::after {
+        animation-duration: 0.9s;
+      }
+
       #bar {
         display: flex;
         align-items: center;
@@ -211,12 +272,20 @@
       }
       #bubble {
         position: relative;
-        width: 270px;
+        width: 250px;
         padding: 10px 14px;
-        border-radius: 16px;
-        background: rgba(7, 11, 16, 0.88);
-        border: 1.5px solid rgba(var(--accent), 0.55);
-        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+        border-radius: 18px;
+        background:
+          radial-gradient(
+            120% 90% at 10% -10%,
+            rgba(255, 255, 255, 0.18),
+            transparent 60%
+          ),
+          rgba(8, 14, 22, 0.66);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.25),
+          0 10px 30px rgba(0, 0, 0, 0.4),
+          0 0 24px rgba(var(--accent), 0.16);
         opacity: 0;
         transform: scale(0.96);
         transition:
@@ -244,8 +313,8 @@
         bottom: 22px;
         width: 10px;
         height: 10px;
-        background: #070b10;
-        border: 1.5px solid rgba(var(--accent), 0.55);
+        background: #0d1822;
+        border: 1.5px solid rgba(255, 255, 255, 0.4);
         transform: rotate(45deg);
       }
       #stage[data-corner$="right"] #bubble::after {
@@ -276,11 +345,18 @@
         position: fixed;
         min-width: 180px;
         padding: 6px;
-        border-radius: 12px;
+        border-radius: 14px;
         display: none;
-        background: rgba(12, 20, 29, 0.97);
-        border: 1px solid rgba(var(--accent), 0.4);
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        background:
+          radial-gradient(
+            120% 90% at 10% -10%,
+            rgba(255, 255, 255, 0.14),
+            transparent 60%
+          ),
+          rgba(10, 17, 26, 0.92);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.18),
+          0 14px 36px rgba(0, 0, 0, 0.5);
       }
       #menu.open {
         display: block;
@@ -304,7 +380,7 @@
       }
       #menu hr {
         border: none;
-        border-top: 1px solid rgba(var(--accent), 0.25);
+        border-top: 1px solid rgba(255, 255, 255, 0.14);
         margin: 4px 0;
       }
     </style>
@@ -313,7 +389,12 @@
     </script>
   </head>
   <body>
-    <div id="stage" data-mode="expanded" data-corner="bottom_right">
+    <div
+      id="stage"
+      data-mode="expanded"
+      data-corner="bottom_right"
+      data-state="idle"
+    >
       <div id="card" class="hit" data-drag>
         <div id="bar">
           <span id="stateLabel">IDLE</span>
