@@ -14,8 +14,9 @@ from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from openai import OpenAI
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
-from body import Body
 from skills import notifications
+
+BODY = "orb"               # "orb" = the glass orb (needs Node, see body-ui), "classic" = the original panel
 
 SAMPLE_RATE = 16000
 BLOCK = 512                # 32 ms per read
@@ -50,8 +51,21 @@ STOP_FILLER = {"it", "that", "this", "now", "please", "sir", "right", "oh", "jus
 
 NOTICE = object()          # returned by wait_for_utterance when a reminder or alarm is waiting
 
+
+def make_body():
+    """The glass orb if it can start, otherwise the classic panel, so Jarvis always has a body."""
+    if BODY == "orb":
+        try:
+            from body_orb import OrbBody
+            return OrbBody()
+        except Exception as e:
+            print(f"[body] the glass orb couldn't start ({e}). Using the classic panel instead.")
+    from body import Body
+    return Body()
+
+
 client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
-body = Body()              # the floating panel
+body = make_body()         # the floating panel
 stt = None                 # loaded in the background thread, so the panel shows up at once
 tts = None
 history = []               # the current conversation, cleared when the follow-up window closes
@@ -180,8 +194,13 @@ def speak(text, stream, error=False):
     body.set_state("error" if error else "speaking")
     if monitor:
         monitor.current_text = text
-    sd.play(samples, rate)
-    sd.wait()                # returns early if you say stop
+    meter = body.voice_level(samples, rate) if hasattr(body, "voice_level") else None   # the orb ripples with his voice
+    try:
+        sd.play(samples, rate)
+        sd.wait()                # returns early if you say stop
+    finally:
+        if meter:
+            meter.stop()
     if monitor:
         monitor.current_text = ""
     time.sleep(0.3)  # let the room echo die down
@@ -230,7 +249,7 @@ def alarm_answer(text):
 
 
 def ring_alarm(stream, threshold, item):
-    """Ring until you dismiss or snooze it (by voice, or by double-clicking the panel). Louder every round."""
+    """Ring until you dismiss or snooze it (by voice, or by double-clicking the orb). Louder every round."""
     label = (item.get("message") or "time to wake up").rstrip(".!?")
     print(f"[alarm] ringing: {label}")
     cancel.clear()
@@ -305,9 +324,12 @@ def deliver_notifications(stream, threshold):
 
 
 def shutdown():
-    """Exit the whole program, panel included, like pressing Ctrl+C."""
+    """Exit the whole program, the orb included, like pressing Ctrl+C."""
     body.set_state("idle")
     print("Jarvis offline.", flush=True)
+    close = getattr(body, "close", None)
+    if close:
+        close()                                   # closes the orb window too
     os._exit(0)     # a hard exit is fine: reminders, alarms and notes are saved the moment they are made
 
 
@@ -334,7 +356,7 @@ def wait_for_utterance(stream, threshold, deadline=None, allow_notice=False):
             preroll.append(block)
             if level > threshold:
                 speaking = True
-                body.set_state("listening")   # panel lights up when you start talking
+                body.set_state("listening")   # the orb lights up when you start talking
                 frames = list(preroll)
                 silence = 0
             elif deadline and time.monotonic() > deadline:
@@ -574,7 +596,7 @@ def jarvis_loop():
                     else:
                         speak("Microphone reconnected, sir.", stream)
                     attempts = 0
-                    print("Jarvis is listening. Say 'Jarvis ...' (double-click the panel to stop him, right-click for the menu)")
+                    print("Jarvis is listening. Say 'Jarvis ...' (double-click the orb to stop him, right-click for the menu)")
                     while True:
                         try:
                             listen_once(stream, threshold)
@@ -592,8 +614,8 @@ def jarvis_loop():
         body.set_jarvis(f"I couldn't start, sir: {e}")
 
 
-body.on_stop = request_stop                                       # double-click the panel to stop him
+body.on_stop = request_stop                                       # double-click the orb to stop him
 signal.signal(signal.SIGINT, lambda signum, frame: shutdown())    # Ctrl+C quits cleanly, like the voice command
 
 threading.Thread(target=jarvis_loop, daemon=True).start()
-body.run()   # the panel owns the main thread; right-click it for the menu
+body.run()   # waits until the orb window is closed

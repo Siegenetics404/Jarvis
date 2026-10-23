@@ -19,11 +19,50 @@ const orb = createOrb($("orbCanvas"));
 const STATE_NAMES = Object.keys(STATES);
 const CORNERS = ["bottom_right", "bottom_left", "top_right", "top_left"];
 
-// ---------- messages to and from Jarvis (Step 3 connects a WebSocket here) ----------
+// ---------- the connection to Jarvis ----------
 let socket = null;
+let everConnected = false;
+let lostAt = 0;
 function send(msg) {
   if (socket && socket.readyState === 1) socket.send(JSON.stringify(msg));
   else console.log("[to Jarvis]", msg);
+}
+
+function connectToJarvis() {
+  const { port, token } = api.config || {};
+  if (!port) return; // started on its own, so only the demo keys work
+  const ws = new WebSocket(
+    `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`,
+  );
+  socket = ws;
+  ws.onopen = () => {
+    everConnected = true;
+    lostAt = 0;
+  };
+  ws.onmessage = (event) => {
+    try {
+      handleMessage(JSON.parse(event.data));
+    } catch (err) {
+      console.error("bad message", err);
+    }
+  };
+  ws.onclose = () => {
+    if (socket === ws) socket = null;
+    if (!lostAt) lostAt = performance.now();
+    // if Jarvis is gone for good, don't leave the orb floating there alone
+    if (everConnected && performance.now() - lostAt > 30000) {
+      api.quit();
+      return;
+    }
+    setTimeout(connectToJarvis, 1500);
+  };
+  ws.onerror = () => {
+    try {
+      ws.close();
+    } catch (err) {
+      /* already closed */
+    }
+  };
 }
 
 // ---------- settings ----------
@@ -241,7 +280,16 @@ function setMinimized(flag, { byUser = true, animate = true } = {}) {
 // ---------- what Jarvis can tell the body ----------
 function handleMessage(m) {
   switch (m.type) {
+    // case "state":
+    //   setState(m.value);
+    //   break;
     case "state":
+      if (
+        flashState &&
+        performance.now() < flashUntil &&
+        (m.value === "idle" || m.value === "listening")
+      )
+        break;
       setState(m.value);
       break;
     case "flash":
@@ -525,6 +573,10 @@ window.addEventListener("keydown", (e) => {
   S = sanitize(await api.loadSettings());
   applySettings();
   setState("idle");
+  //   if (S.start_minimized) setMinimized(true, { animate: false });
+  //   requestAnimationFrame(loop);
+  // })();
   if (S.start_minimized) setMinimized(true, { animate: false });
   requestAnimationFrame(loop);
+  connectToJarvis();
 })();

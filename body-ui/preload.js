@@ -1,6 +1,12 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("jarvis", {
+  // how to reach Jarvis. Empty when you start the orb on its own.
+  config: {
+    port: process.env.JARVIS_BODY_PORT || "",
+    token: process.env.JARVIS_BODY_TOKEN || "",
+  },
+
   // settings storage
   loadSettings: () => ipcRenderer.invoke("settings:load"),
   saveSettings: (settings) => ipcRenderer.send("settings:save", settings),
