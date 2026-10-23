@@ -48,6 +48,7 @@
       }
       #stage[data-mode="minimized"] {
         --orb: var(--orb-min);
+        padding: calc(var(--orb-min) * 0.45 + 4px);
       }
       #stage[data-mode="expanded"] #dock {
         display: none;
@@ -104,7 +105,6 @@
         align-items: center;
         justify-content: space-between;
         height: 30px;
-        cursor: grab;
       }
       #stateLabel {
         font:
@@ -188,73 +188,6 @@
         50% {
           opacity: 0;
         }
-      }
-
-      /* Settings sheet, shown in place of the text */
-      #settings {
-        display: none;
-        flex-direction: column;
-        gap: 10px;
-        padding-top: 6px;
-        overflow-y: auto;
-        min-height: 0;
-        max-height: calc(100vh - 330px);
-      }
-      #card.settingsOpen #texts {
-        display: none;
-      }
-      #card.settingsOpen #settings {
-        display: flex;
-      }
-      #settings h3 {
-        margin: 2px 0 0;
-        font:
-          700 13px "Segoe UI",
-          sans-serif;
-      }
-      #settings label {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        font-size: 12px;
-        color: #9fb6c5;
-      }
-      #settings label.check {
-        flex-direction: row;
-        align-items: center;
-        gap: 8px;
-        color: #cfe3ee;
-      }
-      #settings select {
-        background: #16222c;
-        color: #cfe3ee;
-        border: 1px solid rgba(var(--accent), 0.35);
-        border-radius: 8px;
-        padding: 5px 8px;
-        font:
-          12px "Segoe UI",
-          sans-serif;
-      }
-      input[type="range"] {
-        width: 100%;
-        accent-color: rgb(var(--accent));
-      }
-      .buttons {
-        display: flex;
-        justify-content: flex-end;
-        gap: 8px;
-        margin-top: 4px;
-      }
-      .buttons button {
-        background: #16222c;
-        color: #cfe3ee;
-        border: 1px solid rgba(var(--accent), 0.35);
-        border-radius: 8px;
-        padding: 6px 14px;
-        cursor: pointer;
-      }
-      .buttons button:hover {
-        background: #1d2e3b;
       }
 
       /* Minimized: the orb with its thought bubble beside it, on the side facing the middle of the screen */
@@ -381,8 +314,8 @@
   </head>
   <body>
     <div id="stage" data-mode="expanded" data-corner="bottom_right">
-      <div id="card" class="hit">
-        <div id="bar" data-drag>
+      <div id="card" class="hit" data-drag>
+        <div id="bar">
           <span id="stateLabel">IDLE</span>
           <span class="icons">
             <button id="btnSettings" title="Settings">
@@ -429,67 +362,6 @@
           <div class="who">JARVIS</div>
           <div id="jarvisText" class="empty">
             Click the orb, then press D for a demo.
-          </div>
-        </div>
-
-        <div id="settings">
-          <h3>Panel settings</h3>
-          <label
-            >Transparency <input id="setAlpha" type="range" min="40" max="100"
-          /></label>
-          <label
-            >Position
-            <select id="setCorner">
-              <option value="bottom_right">Bottom right</option>
-              <option value="bottom_left">Bottom left</option>
-              <option value="top_right">Top right</option>
-              <option value="top_left">Top left</option>
-              <option value="custom" disabled>Custom (dragged)</option>
-            </select>
-          </label>
-          <label
-            >Orb size
-            <select id="setOrb">
-              <option value="72">Small</option>
-              <option value="96">Medium</option>
-              <option value="130">Large</option>
-            </select>
-          </label>
-          <label
-            >Color theme
-            <select id="setTheme">
-              <option value="arc">Arc blue</option>
-              <option value="emerald">Emerald</option>
-              <option value="violet">Violet</option>
-              <option value="silver">Silver</option>
-            </select>
-          </label>
-          <label
-            >When he talks while minimized
-            <select id="setTalk">
-              <option value="bubble">Show a thought bubble</option>
-              <option value="open">Open the panel</option>
-              <option value="none">Do nothing</option>
-            </select>
-          </label>
-          <label
-            >Keep the bubble for <b id="valBubble"></b> seconds
-            <input id="setBubble" type="range" min="1" max="15"
-          /></label>
-          <label
-            >Tuck an opened panel away after <b id="valTuck"></b> seconds (0 =
-            never) <input id="setTuck" type="range" min="0" max="120"
-          /></label>
-          <label class="check"
-            ><input id="setStartMin" type="checkbox" /> Start as a small
-            orb</label
-          >
-          <label class="check"
-            ><input id="setTop" type="checkbox" /> Always on top</label
-          >
-          <div class="buttons">
-            <button id="btnReset">Reset</button
-            ><button id="btnDone">Done</button>
           </div>
         </div>
       </div>

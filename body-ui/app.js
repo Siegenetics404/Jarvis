@@ -98,15 +98,24 @@ function placeCorner(corner) {
 async function reanchor() {
   const b = await api.getBounds();
   if (!b) return;
+  const aL = screen.availLeft ?? 0;
+  const aT = screen.availTop ?? 0;
   const r0 = orbBox.getBoundingClientRect();
   const cx = b.x + r0.left + r0.width / 2;
   const cy = b.y + r0.top + r0.height / 2;
-  const left = cx < (screen.availLeft || 0) + screen.availWidth / 2;
-  const top = cy < (screen.availTop || 0) + screen.availHeight / 2;
+  const left = cx < aL + screen.availWidth / 2;
+  const top = cy < aT + screen.availHeight / 2;
   stage.dataset.corner = `${top ? "top" : "bottom"}_${left ? "left" : "right"}`;
   const r1 = orbBox.getBoundingClientRect();
-  const nx = b.x + r0.left - r1.left;
-  const ny = b.y + r0.top - r1.top;
+  let nx = b.x + r0.left - r1.left;
+  let ny = b.y + r0.top - r1.top;
+  // never leave the orb outside the screen
+  nx +=
+    clamp(nx + r1.left, aL + 4, aL + screen.availWidth - r1.width - 4) -
+    (nx + r1.left);
+  ny +=
+    clamp(ny + r1.top, aT + 4, aT + screen.availHeight - r1.height - 4) -
+    (ny + r1.top);
   api.moveTo(nx, ny);
   S.corner = "custom";
   S.anchor = stage.dataset.corner;
@@ -229,15 +238,6 @@ function setMinimized(flag, { byUser = true, animate = true } = {}) {
   else change();
 }
 
-function openSettings() {
-  if (minimized) setMinimized(false);
-  syncSettingsUI();
-  card.classList.add("settingsOpen");
-}
-function closeSettings() {
-  card.classList.remove("settingsOpen");
-}
-
 // ---------- what Jarvis can tell the body ----------
 function handleMessage(m) {
   switch (m.type) {
@@ -266,7 +266,7 @@ function handleMessage(m) {
       if (m.action === "minimize") setMinimized(true);
       else if (m.action === "expand") setMinimized(false);
       else if (m.action === "toggle") setMinimized(!minimized);
-      else if (m.action === "settings") openSettings();
+      else if (m.action === "settings") api.openSettings();
       break;
   }
 }
@@ -301,7 +301,6 @@ function loop(now) {
     !minimized &&
     autoOpened &&
     S.tuck_seconds > 0 &&
-    !card.classList.contains("settingsOpen") &&
     now - lastActive > S.tuck_seconds * 1000
   ) {
     setMinimized(true, { byUser: false });
@@ -341,38 +340,30 @@ function setInteractive(on) {
   }
 }
 document.addEventListener("mousemove", (e) => {
-  if (drag) setInteractive(true);
-  else setInteractive(!!e.target.closest(".hit"));
-  if (!drag) return;
-  const dx = e.screenX - drag.sx,
-    dy = e.screenY - drag.sy;
-  if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
-  if (drag.moved) api.moveTo(drag.bx + dx, drag.by + dy);
+  if (drag) {
+    setInteractive(true);
+    return;
+  }
+  setInteractive(!!e.target.closest(".hit"));
 });
 
-document.addEventListener("mousedown", async (e) => {
+// The main process follows the real cursor while you hold the button, so the window can't drift
+document.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
   const zone = e.target.closest("[data-drag]");
-  if (!zone) return;
-  if (zone === orbBox && minimized) dismissed = true; // touching the orb hides the bubble
-  const b = await api.getBounds();
-  if (b)
-    drag = {
-      sx: e.screenX,
-      sy: e.screenY,
-      bx: b.x,
-      by: b.y,
-      moved: false,
-      zone,
-    };
+  if (!zone || e.target.closest("button, #jarvisText, #bubble")) return;
+  if (minimized && zone === orbBox) dismissed = true; // touching the orb hides the bubble
+  drag = { zone };
+  api.startDrag();
 });
 
-document.addEventListener("mouseup", () => {
+document.addEventListener("mouseup", async () => {
   if (!drag) return;
   const d = drag;
   drag = null;
-  if (d.moved) reanchor();
-  else if (d.zone === orbBox && minimized) setMinimized(false);
+  const moved = await api.endDrag();
+  if (moved) reanchor();
+  else if (d.zone === orbBox && minimized) setMinimized(false); // a click on the orb opens the panel
 });
 
 orbBox.addEventListener("dblclick", () => {
@@ -380,9 +371,7 @@ orbBox.addEventListener("dblclick", () => {
 });
 bubble.addEventListener("click", () => setMinimized(false));
 $("btnMin").addEventListener("click", () => setMinimized(true));
-$("btnSettings").addEventListener("click", () =>
-  card.classList.contains("settingsOpen") ? closeSettings() : openSettings(),
-);
+$("btnSettings").addEventListener("click", () => api.openSettings());
 
 // ---------- right-click menu ----------
 const menu = $("menu"),
@@ -410,71 +399,26 @@ menu.addEventListener("click", (e) => {
   const act = e.target.dataset && e.target.dataset.act;
   closeMenu();
   if (act === "toggle") setMinimized(!minimized);
-  else if (act === "settings") openSettings();
+  else if (act === "settings") api.openSettings();
   else if (act === "stop") send({ type: "stop" });
   else if (act === "quit") api.quit();
 });
 
-// ---------- settings sheet ----------
-function syncSettingsUI() {
-  $("setAlpha").value = Math.round(S.alpha * 100);
-  $("setCorner").value = S.corner;
-  $("setOrb").value = String(S.orb_size);
-  $("setTheme").value = S.theme;
-  $("setTalk").value = S.talk_mode;
-  $("setBubble").value = S.bubble_seconds;
-  $("valBubble").textContent = S.bubble_seconds;
-  $("setTuck").value = S.tuck_seconds;
-  $("valTuck").textContent = S.tuck_seconds;
-  $("setStartMin").checked = S.start_minimized;
-  $("setTop").checked = S.always_on_top;
-}
-
-$("setAlpha").addEventListener("input", (e) => {
-  S.alpha = e.target.value / 100;
-  applySettings();
+// ---------- changes coming from the settings window ----------
+api.onSettingsChanged((changes) => {
+  const sizeChanged =
+    "orb_size" in changes && Number(changes.orb_size) !== S.orb_size;
+  S = sanitize({ ...S, ...changes });
+  if (sizeChanged) flip(orbBox, applySettings);
+  else applySettings();
+  if ("corner" in changes && CORNERS.includes(changes.corner))
+    placeCorner(changes.corner); // moves him and saves
   save();
 });
-$("setCorner").addEventListener("change", (e) => placeCorner(e.target.value));
-$("setOrb").addEventListener("change", (e) => {
-  S.orb_size = Number(e.target.value);
-  flip(orbBox, applySettings);
-  save();
-});
-$("setTheme").addEventListener("change", (e) => {
-  S.theme = e.target.value;
-  applySettings();
-  save();
-});
-$("setTalk").addEventListener("change", (e) => {
-  S.talk_mode = e.target.value;
-  save();
-});
-$("setBubble").addEventListener("input", (e) => {
-  S.bubble_seconds = Number(e.target.value);
-  $("valBubble").textContent = S.bubble_seconds;
-  save();
-});
-$("setTuck").addEventListener("input", (e) => {
-  S.tuck_seconds = Number(e.target.value);
-  $("valTuck").textContent = S.tuck_seconds;
-  save();
-});
-$("setStartMin").addEventListener("change", (e) => {
-  S.start_minimized = e.target.checked;
-  save();
-});
-$("setTop").addEventListener("change", (e) => {
-  S.always_on_top = e.target.checked;
-  applySettings();
-  save();
-});
-$("btnDone").addEventListener("click", closeSettings);
-$("btnReset").addEventListener("click", () => {
+api.onSettingsReset(() => {
   S = { ...DEFAULTS };
-  applySettings();
+  flip(orbBox, applySettings);
   placeCorner(S.corner);
-  syncSettingsUI();
   save();
 });
 
@@ -568,10 +512,8 @@ async function toggleDemo() {
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeMenu();
-    closeSettings();
     return;
   }
-  if (e.target.matches("input, select")) return;
   const n = parseInt(e.key, 10);
   if (n >= 1 && n <= STATE_NAMES.length) setState(STATE_NAMES[n - 1]);
   if (e.key === "m") setMinimized(!minimized);
@@ -582,7 +524,6 @@ window.addEventListener("keydown", (e) => {
 (async function init() {
   S = sanitize(await api.loadSettings());
   applySettings();
-  syncSettingsUI();
   setState("idle");
   if (S.start_minimized) setMinimized(true, { animate: false });
   requestAnimationFrame(loop);

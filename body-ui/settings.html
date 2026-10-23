@@ -1,0 +1,238 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Jarvis panel settings</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        background: #0b1218;
+        color: #cfe3ee;
+        font:
+          13px "Segoe UI",
+          sans-serif;
+        user-select: none;
+      }
+      body {
+        padding: 16px 22px 20px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 190px 1fr;
+        align-items: center;
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .value {
+        color: #7f98a8;
+        font-size: 12px;
+        margin-left: 4px;
+      }
+      select {
+        background: #16222c;
+        color: #cfe3ee;
+        border: 1px solid #2a4150;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font: inherit;
+        width: 100%;
+      }
+      input[type="range"] {
+        width: 100%;
+        accent-color: #2d7d9b;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 16px;
+      }
+      .check input {
+        accent-color: #2d7d9b;
+        width: 15px;
+        height: 15px;
+      }
+      .buttons {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 24px;
+      }
+      button {
+        background: #16222c;
+        color: #cfe3ee;
+        border: 1px solid #2a4150;
+        border-radius: 6px;
+        padding: 7px 18px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #1d2e3b;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Panel settings</h1>
+
+    <div class="row">
+      <label for="alpha"
+        >Transparency <span class="value" id="vAlpha"></span
+      ></label>
+      <input id="alpha" type="range" min="40" max="100" />
+    </div>
+
+    <div class="row">
+      <label for="corner">Position</label>
+      <select id="corner">
+        <option value="bottom_right">Bottom right</option>
+        <option value="bottom_left">Bottom left</option>
+        <option value="top_right">Top right</option>
+        <option value="top_left">Top left</option>
+        <option value="custom" disabled>Custom (dragged)</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="orb">Orb size</label>
+      <select id="orb">
+        <option value="72">Small</option>
+        <option value="96">Medium</option>
+        <option value="130">Large</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="theme">Color theme</label>
+      <select id="theme">
+        <option value="arc">Arc blue</option>
+        <option value="emerald">Emerald</option>
+        <option value="violet">Violet</option>
+        <option value="silver">Silver</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="talk">When he talks while minimized</label>
+      <select id="talk">
+        <option value="bubble">Show a thought bubble</option>
+        <option value="open">Open the panel</option>
+        <option value="none">Do nothing</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="bubble"
+        >Keep the bubble for <span class="value" id="vBubble"></span
+      ></label>
+      <input id="bubble" type="range" min="1" max="15" />
+    </div>
+
+    <div class="row">
+      <label for="tuck"
+        >Tuck an opened panel away after <span class="value" id="vTuck"></span
+      ></label>
+      <input id="tuck" type="range" min="0" max="120" />
+    </div>
+
+    <label class="check"
+      ><input id="startMin" type="checkbox" /> Start as a small orb</label
+    >
+    <label class="check"
+      ><input id="top" type="checkbox" /> Always on top</label
+    >
+
+    <div class="buttons">
+      <button id="reset">Reset</button><button id="close">Close</button>
+    </div>
+
+    <script>
+      const api = window.jarvis;
+      const $ = (id) => document.getElementById(id);
+      const D = {
+        alpha: 0.9,
+        corner: "bottom_right",
+        orb_size: 96,
+        theme: "arc",
+        talk_mode: "bubble",
+        bubble_seconds: 4,
+        tuck_seconds: 20,
+        start_minimized: false,
+        always_on_top: true,
+      };
+      let S = { ...D };
+
+      function show() {
+        $("vAlpha").textContent = Math.round(S.alpha * 100) + "%";
+        $("vBubble").textContent = S.bubble_seconds + " s";
+        $("vTuck").textContent = S.tuck_seconds
+          ? S.tuck_seconds + " s"
+          : "never";
+      }
+      function fill() {
+        $("alpha").value = Math.round(S.alpha * 100);
+        $("corner").value = S.corner;
+        $("orb").value = String(S.orb_size);
+        $("theme").value = S.theme;
+        $("talk").value = S.talk_mode;
+        $("bubble").value = S.bubble_seconds;
+        $("tuck").value = S.tuck_seconds;
+        $("startMin").checked = !!S.start_minimized;
+        $("top").checked = S.always_on_top !== false;
+        show();
+      }
+      async function load() {
+        S = { ...D, ...(await api.loadSettings()) };
+        fill();
+      }
+
+      // every change goes straight to the panel, so you see it happen
+      function change(key, value) {
+        S[key] = value;
+        show();
+        api.updateSettings({ [key]: value });
+      }
+
+      $("alpha").addEventListener("input", (e) =>
+        change("alpha", e.target.value / 100),
+      );
+      $("corner").addEventListener("change", (e) =>
+        change("corner", e.target.value),
+      );
+      $("orb").addEventListener("change", (e) =>
+        change("orb_size", Number(e.target.value)),
+      );
+      $("theme").addEventListener("change", (e) =>
+        change("theme", e.target.value),
+      );
+      $("talk").addEventListener("change", (e) =>
+        change("talk_mode", e.target.value),
+      );
+      $("bubble").addEventListener("input", (e) =>
+        change("bubble_seconds", Number(e.target.value)),
+      );
+      $("tuck").addEventListener("input", (e) =>
+        change("tuck_seconds", Number(e.target.value)),
+      );
+      $("startMin").addEventListener("change", (e) =>
+        change("start_minimized", e.target.checked),
+      );
+      $("top").addEventListener("change", (e) =>
+        change("always_on_top", e.target.checked),
+      );
+      $("reset").addEventListener("click", () => api.resetSettings());
+      $("close").addEventListener("click", () => api.closeSettings());
+      api.onSettingsRefresh(load);
+
+      load();
+    </script>
+  </body>
+</html>
