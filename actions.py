@@ -239,11 +239,34 @@ def open_website(url):
     return f"Opening {host}"
 
 
-def play_youtube(query):
+_utterance = ""        # what you just said, set by run_tool, so a tool can recover details the model left out
+
+
+def _query_from_speech(text):
+    """Pull the song or artist out of a sentence like 'open YouTube and play some Charlie Puth music'."""
+    t = (text or "").lower()
+    t = re.sub(r"\b(open|go to|launch|start)\s+youtube\b\s*(and\s+|then\s+)?", " ", t)
+    t = re.sub(r"\b(on|in|from|using)\s+youtube\b", " ", t)
+    t = re.sub(r"\byoutube\b", " ", t)
+    t = re.sub(r"\b(please|jarvis|sir|for me|can you|could you|would you)\b", " ", t)
+    t = re.sub(r"^\W*(play|put on|listen to|search for|search|find|look up)\b", " ", t)
+    t = re.sub(r"^\W*(some|any|a|an|the|something by|songs? by|music by)\b", " ", t)
+    return " ".join(t.split()).strip(" .,!?")
+
+
+def play_youtube(query=""):
     """Find the best match on YouTube and open that video, which starts playing."""
+    query = (query or "").strip()
+    if not query:                                   # the model left it out: take it from what you said
+        query = _query_from_speech(_utterance)
+        if query:
+            print(f"[youtube] the model sent no song, so I used: {query}")
+    if len(query) < 2:
+        return "What should I play, sir?"
     try:
         from yt_dlp import YoutubeDL
-        opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True,
+                "socket_timeout": 8}
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(f"ytsearch5:{query}", download=False)
         for entry in info.get("entries") or []:
@@ -476,11 +499,27 @@ def _load_skills():
 _load_skills()
 
 
-def run_tool(name, arguments_json):
+def run_tool(name, arguments_json, utterance=""):
+    """Run a tool the model asked for. Wrong or missing arguments never crash it or get read out as Python errors."""
+    import inspect
+    global _utterance
+    _utterance = utterance or ""
     func = TOOLS.get(name)
     if not func:
         return f"Unknown tool: {name}"
     try:
-        return func(**json.loads(arguments_json or "{}"))
+        args = json.loads(arguments_json or "{}")
+        if not isinstance(args, dict):
+            args = {}
+    except ValueError:
+        args = {}
+    allowed = inspect.signature(func).parameters
+    args = {key: value for key, value in args.items() if key in allowed}      # ignore arguments the tool doesn't have
+    try:
+        return func(**args)
+    except TypeError as e:
+        print(f"[tool] {name} got the wrong arguments: {e}")
+        return "I couldn't catch the details for that, sir. Could you say it again?"
     except Exception as e:
+        print(f"[tool] {name} failed: {e}")
         return f"{name} failed: {e}"

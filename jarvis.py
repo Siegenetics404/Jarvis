@@ -99,7 +99,20 @@ SYSTEM = (
     "The user may reply briefly, like 'yes' or 'do that', so use the earlier messages to understand what they mean."
 )
 
-PROMPT_HINT = "Jarvis, open Docker Desktop, close Ubuntu, open AmeFil project, play Odoriko on YouTube."
+def load_hint():
+    """Names Whisper should spell right: a few built in, plus anything in data/vocabulary.txt (one name per line)."""
+    names = ["Docker Desktop", "Ubuntu", "AmeFil", "Odoriko"]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vocabulary.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            names += [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    except OSError:
+        pass
+    names = list(dict.fromkeys(names))[:40]          # Whisper only reads a short hint
+    return "Jarvis, open and close apps, play music on YouTube. Names: " + ", ".join(names) + "."
+
+
+PROMPT_HINT = load_hint()
 
 
 def rms(block):
@@ -396,6 +409,17 @@ def remember(user_text, reply):
     del history[:-MAX_HISTORY]
 
 
+def brain_problem():
+    """Say what is probably wrong with the language model, so you know what to fix."""
+    try:
+        models = client.models.list().data
+    except Exception:
+        return "I can't reach my brain, sir. Is LM Studio's server running?"
+    if not models:
+        return "My language model isn't loaded, sir. Please load it again in LM Studio."
+    return "My language model stopped answering, sir. It may have crashed on the graphics card. Try reloading it."
+
+
 def handle(text, stream):
     body.set_state("thinking")
 
@@ -417,15 +441,18 @@ def handle(text, stream):
     messages = [{"role": "system", "content": SYSTEM}] + history[-MAX_HISTORY:] + [
         {"role": "user", "content": text}
     ]
-    try:
-        resp = client.chat.completions.create(
-            model="local-model",
-            messages=messages,
-            tools=tools,
-        )
-    except Exception as e:
-        print("LM Studio error:", e)
-        speak("I can't reach my brain, sir. Is LM Studio's server running?", stream, error=True)
+    resp = None
+    for attempt in range(2):                      # one quiet retry: LM Studio sometimes needs a moment after a hiccup
+        try:
+            resp = client.chat.completions.create(model="local-model", messages=messages, tools=tools)
+            break
+        except Exception as e:
+            print(f"LM Studio error (try {attempt + 1}): {e}")
+            time.sleep(2)
+    if resp is None:
+        if cancel.is_set():        # you said stop while he was trying: stay quiet
+            return
+        speak(brain_problem(), stream, error=True)
         return
 
     if cancel.is_set():            # you said stop while he was thinking: do nothing
@@ -443,7 +470,7 @@ def handle(text, stream):
     for call in msg.tool_calls:
         if cancel.is_set():        # stop: skip the remaining actions
             break
-        result = run_tool(call.function.name, call.function.arguments)
+        result = run_tool(call.function.name, call.function.arguments, text)
         results.append(result)
         speak(result, stream, error=looks_like_error(result))
     if QUIT.is_set():              # he has said goodbye, now actually leave
@@ -575,6 +602,20 @@ def mic_lost(e, attempts):
         print("[mic] couldn't refresh the device list:", err)
 
 
+def greeting():
+    """A hello that matches the time on your PC's clock."""
+    hour = time.localtime().tm_hour
+    if 5 <= hour < 12:
+        hello = "Good morning, sir."
+    elif 12 <= hour < 17:
+        hello = "Good afternoon, sir."
+    elif 17 <= hour < 22:
+        hello = "Good evening, sir."
+    else:
+        hello = "Working late, sir?"
+    return f"{hello} All systems are online."
+
+
 def jarvis_loop():
     global stt, tts
     try:
@@ -591,7 +632,7 @@ def jarvis_loop():
                     body.set_jarvis("Calibrating... stay quiet for a second.")
                     threshold = calibrate(stream)
                     if first_start:
-                        speak("Good evening, sir. All systems are online.", stream)
+                        speak(greeting(), stream)
                         first_start = False
                     else:
                         speak("Microphone reconnected, sir.", stream)
