@@ -149,27 +149,29 @@ function openSettingsWindow() {
     return;
   }
   const wa = screen.getPrimaryDisplay().workArea;
-  const w = 440;
-  const h = Math.min(640, wa.height - 40);
+  const w = 460;
+  const h = Math.min(720, wa.height - 20);
   settingsWin = new BrowserWindow({
     width: w,
     height: h,
     x: wa.x + Math.round((wa.width - w) / 2),
     y: wa.y + Math.round((wa.height - h) / 2),
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false,
     resizable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
     title: "Jarvis panel settings",
-    backgroundColor: "#0b1218",
-    autoHideMenuBar: true,
     alwaysOnTop: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
     },
   });
-  settingsWin.setMenu(null);
+  settingsWin.setAlwaysOnTop(true, "floating");
   settingsWin.loadFile("settings.html");
   settingsWin.on("closed", () => {
     settingsWin = null;
