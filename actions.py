@@ -241,10 +241,15 @@ def open_website(url):
 
 _utterance = ""        # what you just said, set by run_tool, so a tool can recover details the model left out
 
+# "and skip ads", "skip the ads", "then skip those ads"...
+_SKIP_ADS = re.compile(
+    r"\b(?:and\s+|then\s+|also\s+|but\s+)?skip(?:ping)?\s+(?:the\s+|all\s+|those\s+|any\s+)?(?:youtube\s+)?(?:ads?|adds?)\b",
+    re.I)
+
 
 def _query_from_speech(text):
     """Pull the song or artist out of a sentence like 'open YouTube and play some Charlie Puth music'."""
-    t = (text or "").lower()
+    t = _SKIP_ADS.sub(" ", (text or "").lower())
     t = re.sub(r"\b(open|go to|launch|start)\s+youtube\b\s*(and\s+|then\s+)?", " ", t)
     t = re.sub(r"\b(on|in|from|using)\s+youtube\b", " ", t)
     t = re.sub(r"\byoutube\b", " ", t)
@@ -254,9 +259,27 @@ def _query_from_speech(text):
     return " ".join(t.split()).strip(" .,!?")
 
 
+def _auto_skip_note():
+    """Switch on 'press Skip when YouTube allows it'. Returns the words to add to what he says."""
+    try:
+        from skills.youtube import enable_auto_skip
+        ok = enable_auto_skip()
+    except Exception:
+        try:
+            bridge.request("yt_auto_skip", on=True)
+            ok = True
+        except Exception:
+            ok = False
+    if ok:
+        return ", and I'll skip the ads, sir."
+    return ", but I can't reach the browser extension to skip ads, sir."
+
+
 def play_youtube(query=""):
-    """Find the best match on YouTube and open that video, which starts playing."""
-    query = (query or "").strip()
+    """Find the best match on YouTube and open that video, which starts playing.
+    If you also said 'skip ads', auto skip is switched on so the Skip button gets pressed when it appears."""
+    wants_skip = bool(_SKIP_ADS.search(_utterance))
+    query = " ".join(_SKIP_ADS.sub(" ", query or "").split()).strip(" .,!?")
     if not query:                                   # the model left it out: take it from what you said
         query = _query_from_speech(_utterance)
         if query:
@@ -274,8 +297,9 @@ def play_youtube(query=""):
             if len(vid) == 11 and "/shorts/" not in (entry.get("url") or ""):
                 title = str(entry.get("title")).encode("ascii", "replace").decode()   # safe for the Windows console
                 print(f"[youtube] picked: {title} -> https://www.youtube.com/watch?v={vid}")
+                note = _auto_skip_note() if wants_skip else ""      # switched on before the page loads, so a first ad is caught
                 launch_browser(f"https://www.youtube.com/watch?v={vid}")
-                return f"Playing {query} on YouTube"
+                return f"Playing {query} on YouTube" + (note if note else "")
     except Exception as e:
         print("[youtube] lookup failed:", e)
     launch_browser("https://www.youtube.com/results?search_query=" + quote_plus(query))

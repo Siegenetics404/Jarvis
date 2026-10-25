@@ -60,18 +60,85 @@ async function youtubeTab() {
   return pool[0];
 }
 
+// Put the YouTube script into a tab. It does nothing if the tab already has it.
+async function injectYouTubeScript(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["yt_content.js"],
+    });
+  } catch (e) {} // a tab that is closing or can't be scripted, skip it
+}
+
+async function injectIntoAllYouTubeTabs() {
+  const tabs = await chrome.tabs.query({ url: ["*://www.youtube.com/*"] });
+  for (const tab of tabs) await injectYouTubeScript(tab.id);
+}
+
 // Tabs that were already open before the extension was reloaded don't have the YouTube script yet, so add it
 async function sendToYouTube(tabId, payload) {
   try {
     return await chrome.tabs.sendMessage(tabId, payload);
   } catch (err) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["yt_content.js"],
-    });
+    await injectYouTubeScript(tabId);
     return await chrome.tabs.sendMessage(tabId, payload);
   }
 }
+
+// A real mouse click on the Skip button, for when YouTube ignores clicks made by scripts.
+// Chrome shows "started debugging this browser" for a moment while this runs.
+async function realClickOnSkip(tabId) {
+  const target = { tabId };
+  try {
+    await chrome.debugger.attach(target, "1.3");
+  } catch (e) {
+    if (!/already attached/i.test(String(e)))
+      return { ok: false, error: String(e) };
+  }
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 350)); // the bar appears and the page settles
+    // Ask the page again where the button is, because the bar can move things a little
+    const [{ result }] = await chrome.scripting.executeScript({
+      target,
+      func: () =>
+        window.__jarvisSkipPoint ? window.__jarvisSkipPoint() : null,
+    });
+    if (!result) return { ok: false, error: "no skip button" };
+    for (const [type, buttons] of [
+      ["mouseMoved", 0],
+      ["mousePressed", 1],
+      ["mouseReleased", 0],
+    ]) {
+      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        type,
+        x: result.x,
+        y: result.y,
+        button: type === "mouseMoved" ? "none" : "left",
+        buttons,
+        clickCount: type === "mouseMoved" ? 0 : 1,
+      });
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  } finally {
+    try {
+      await chrome.debugger.detach(target);
+    } catch (e) {}
+  }
+}
+
+// The YouTube page asks for a real click. Only YouTube tabs may ask.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !msg.jarvisClick) return;
+  const tab = sender.tab;
+  if (!tab || !tab.url || !tab.url.startsWith("https://www.youtube.com/")) {
+    sendResponse({ ok: false, error: "not a YouTube tab" });
+    return;
+  }
+  realClickOnSkip(tab.id).then(sendResponse);
+  return true; // the answer comes a moment later
+});
 
 async function handle(msg) {
   if (msg.action === "list_tabs") {
@@ -108,6 +175,7 @@ async function handle(msg) {
   // Turn "press Skip on ads automatically" on or off
   if (msg.action === "yt_auto_skip") {
     await chrome.storage.local.set({ autoSkip: !!msg.on });
+    if (msg.on) await injectIntoAllYouTubeTabs(); // so tabs that are already open start watching right away
     return { ok: true };
   }
 
@@ -125,6 +193,18 @@ async function handle(msg) {
 
   return { error: "unknown action: " + msg.action };
 }
+
+// A YouTube page just finished loading: if auto skip is on, make sure it is being watched
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (
+    info.status !== "complete" ||
+    !tab.url ||
+    !tab.url.startsWith("https://www.youtube.com/")
+  )
+    return;
+  const { autoSkip } = await chrome.storage.local.get({ autoSkip: false });
+  if (autoSkip) injectYouTubeScript(tabId);
+});
 
 // If Jarvis wasn't running yet, try again every 30 seconds
 chrome.alarms.create("reconnect", { periodInMinutes: 0.5 });
