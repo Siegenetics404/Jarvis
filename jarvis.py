@@ -1,4 +1,5 @@
 import difflib
+import json
 import os
 import re
 import signal
@@ -13,6 +14,7 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from openai import OpenAI
+import session_memory
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from skills import notifications
 
@@ -438,7 +440,18 @@ def handle(text, stream):
         remember(text, answer)
         return
 
-    messages = [{"role": "system", "content": SYSTEM}] + history[-MAX_HISTORY:] + [
+    # "Close it", "undo that": plain code closes whatever he opened last, no model needed
+    shortcut = session_memory.resolve_followup(text)
+    if shortcut:
+        args_json = json.dumps(shortcut["args"])
+        result = run_tool(shortcut["tool"], args_json, text)
+        session_memory.record(text, shortcut["tool"], args_json, result)
+        speak(result, stream, error=looks_like_error(result))
+        remember(text, result)
+        return
+
+    # The model also sees what he did recently, so "it", "that" and "the song" make sense
+    messages = [{"role": "system", "content": SYSTEM + session_memory.context_block()}] + history[-MAX_HISTORY:] + [
         {"role": "user", "content": text}
     ]
     resp = None
@@ -471,6 +484,7 @@ def handle(text, stream):
         if cancel.is_set():        # stop: skip the remaining actions
             break
         result = run_tool(call.function.name, call.function.arguments, text)
+        session_memory.record(text, call.function.name, call.function.arguments, result)
         results.append(result)
         speak(result, stream, error=looks_like_error(result))
     if QUIT.is_set():              # he has said goodbye, now actually leave

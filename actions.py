@@ -13,6 +13,7 @@ from urllib.parse import quote_plus, urlparse
 
 import browser_bridge as bridge
 from skills import tool as _tool
+import session_memory
 
 # Set when the user tells Jarvis to shut himself down. jarvis.py checks it after he says goodbye.
 QUIT = threading.Event()
@@ -299,6 +300,7 @@ def play_youtube(query=""):
                 print(f"[youtube] picked: {title} -> https://www.youtube.com/watch?v={vid}")
                 note = _auto_skip_note() if wants_skip else ""      # switched on before the page loads, so a first ad is caught
                 launch_browser(f"https://www.youtube.com/watch?v={vid}")
+                session_memory.set_target("youtube", query, vid)    # so "close it" closes exactly this video's tab
                 return f"Playing {query} on YouTube" + (note if note else "")
     except Exception as e:
         print("[youtube] lookup failed:", e)
