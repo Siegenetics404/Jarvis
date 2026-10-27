@@ -17,6 +17,7 @@ from openai import OpenAI
 import session_memory
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from skills import notifications
+from skills import browser_refresh
 
 BODY = "orb"               # "orb" = the glass orb (needs Node, see body-ui), "classic" = the original panel
 
@@ -428,6 +429,7 @@ def handle(text, stream):
     # "Jarvis, stop" when nothing is running
     if is_stop(text):
         resolve_pending("stop")        # also ends any open question
+        browser_refresh.cancel_pending()
         speak("Standing by, sir.", stream)
         return
 
@@ -438,6 +440,13 @@ def handle(text, stream):
         if QUIT.is_set():          # he has said goodbye, now actually leave
             shutdown()
         remember(text, answer)
+        return
+
+    # The answer to "which tab, or all of them?" after a refresh question
+    choice = browser_refresh.resolve_choice(text)
+    if choice:
+        speak(choice, stream, error=looks_like_error(choice))
+        remember(text, choice)
         return
 
     # "Close it", "undo that": plain code closes whatever he opened last, no model needed

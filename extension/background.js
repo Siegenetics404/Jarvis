@@ -148,6 +148,29 @@ async function handle(msg) {
     };
   }
 
+  // The tab you are looking at, in the Chrome window you used last
+  if (msg.action === "current_tab") {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true,
+    });
+    return {
+      tab: tab ? { id: tab.id, title: tab.title, url: tab.url } : null,
+    };
+  }
+
+  // Refresh exactly the tabs Jarvis chose, by ID (hard = skip the cache)
+  if (msg.action === "reload_ids") {
+    let reloaded = 0;
+    for (const id of msg.ids || []) {
+      try {
+        await chrome.tabs.reload(id, { bypassCache: !!msg.hard });
+        reloaded++;
+      } catch (e) {} // already closed, skip it
+    }
+    return { reloaded };
+  }
+
   // Close exactly the tabs Jarvis chose, by ID
   if (msg.action === "close_ids") {
     let closed = 0;
