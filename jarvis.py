@@ -14,10 +14,12 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from openai import OpenAI
+import safety
 import session_memory
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from skills import notifications
 from skills import browser_refresh
+from skills import power
 
 BODY = "orb"               # "orb" = the glass orb (needs Node, see body-ui), "classic" = the original panel
 
@@ -51,6 +53,8 @@ ERROR_HINTS = ("couldn't", "can't", "failed", "unknown tool", "isn't running", "
 STOP_TRIGGERS = {"stop", "cancel", "abort", "enough", "quiet", "nevermind"}
 STOP_FILLER = {"it", "that", "this", "now", "please", "sir", "right", "oh", "just", "all",
                "everything", "talking", "never", "mind", "be", "okay", "ok"}
+
+last_confidence = 0.0       # how sure Whisper was about the last thing it heard (closer to 0 is surer)
 
 NOTICE = object()          # returned by wait_for_utterance when a reminder or alarm is waiting
 
@@ -390,11 +394,14 @@ def wait_for_utterance(stream, threshold, deadline=None, allow_notice=False):
 
 
 def transcribe(audio):
+    global last_confidence
     body.set_state("thinking")
     segments, _ = stt.transcribe(
         audio, language="en", vad_filter=True, initial_prompt=PROMPT_HINT
     )
-    return " ".join(s.text.strip() for s in segments).strip()
+    parts = list(segments)
+    last_confidence = sum(s.avg_logprob for s in parts) / len(parts) if parts else 0.0
+    return " ".join(s.text.strip() for s in parts).strip()
 
 
 def split_wake_word(text):
@@ -430,7 +437,9 @@ def handle(text, stream):
     if is_stop(text):
         resolve_pending("stop")        # also ends any open question
         browser_refresh.cancel_pending()
-        speak("Standing by, sir.", stream)
+        safety.cancel()
+        undone = power.abort_pending()          # "stop" also cancels a shutdown that is counting down
+        speak(undone or "Standing by, sir.", stream)
         return
 
     # Shutdown requests, and the yes or no to "shall I close them all?", are handled here, not by the model
@@ -440,6 +449,13 @@ def handle(text, stream):
         if QUIT.is_set():          # he has said goodbye, now actually leave
             shutdown()
         remember(text, answer)
+        return
+
+    # Your yes or no to "are you sure?" (power, closing programs, or something he may have misheard)
+    verdict = safety.resolve_confirmation(text, run_tool)
+    if verdict:
+        speak(verdict, stream, error=looks_like_error(verdict))
+        remember(text, verdict)
         return
 
     # The answer to "which tab, or all of them?" after a refresh question
@@ -453,6 +469,11 @@ def handle(text, stream):
     shortcut = session_memory.resolve_followup(text)
     if shortcut:
         args_json = json.dumps(shortcut["args"])
+        ask = safety.review(shortcut["tool"], args_json, text, last_confidence)
+        if ask:
+            speak(ask, stream)
+            remember(text, ask)
+            return
         result = run_tool(shortcut["tool"], args_json, text)
         session_memory.record(text, shortcut["tool"], args_json, result)
         speak(result, stream, error=looks_like_error(result))
@@ -492,6 +513,11 @@ def handle(text, stream):
     for call in msg.tool_calls:
         if cancel.is_set():        # stop: skip the remaining actions
             break
+        ask = safety.review(call.function.name, call.function.arguments, text, last_confidence)
+        if ask:                    # risky, or he may have misheard: ask first, run nothing yet
+            speak(ask, stream)
+            remember(text, ask)
+            return
         result = run_tool(call.function.name, call.function.arguments, text)
         session_memory.record(text, call.function.name, call.function.arguments, result)
         results.append(result)
@@ -504,7 +530,7 @@ def handle(text, stream):
 
 def run_command(command, stream, threshold):
     global active_monitor
-    print("You said:", command)
+    print(f"You said: {command}   (confidence {last_confidence:.2f}, asks to confirm below {safety.LOW_CONFIDENCE})")
     body.set_user(command)
     body.set_jarvis("")            # clear the old reply while he thinks
     cancel.clear()
@@ -525,15 +551,25 @@ def run_command(command, stream, threshold):
         if cancel.is_set():
             history.clear()
             resolve_pending("stop")          # forget any open question
+            safety.cancel()
+            power.abort_pending()            # stopping him mid-sentence also cancels a countdown
             body.set_jarvis("Stopped.")
             body.flash("ignored", 1.5)
 
 
+def followup_seconds():
+    """Longer window while he waits for a yes or no, or while a shutdown can still be cancelled."""
+    return safety.CONFIRM_SECONDS if (safety.waiting() or power.counting_down()) else FOLLOWUP_SECONDS
+
+
 def follow_up(stream, threshold):
     """After he answers, keep listening for a few seconds. No wake word needed."""
-    deadline = time.monotonic() + FOLLOWUP_SECONDS
+    deadline = time.monotonic() + followup_seconds()
     while True:
         if cancel.is_set():             # you stopped him: no follow-up window
+            undone = power.abort_pending()      # a double-click on the orb also cancels a shutdown
+            if undone:
+                speak(undone, stream)
             break
         body.set_state("listening")     # cyan: he's waiting for you
         audio = wait_for_utterance(stream, threshold, deadline)
@@ -545,7 +581,7 @@ def follow_up(stream, threshold):
                 run_command(command, stream, threshold)
             else:
                 speak("Yes, sir?", stream)       # you only said "Jarvis"
-            deadline = time.monotonic() + FOLLOWUP_SECONDS
+            deadline = time.monotonic() + followup_seconds()
         elif time.monotonic() >= deadline:
             break
     history.clear()                     # conversation over, next "Jarvis" starts fresh
