@@ -6,6 +6,7 @@ import signal
 import threading
 import time
 import traceback
+from types import SimpleNamespace
 import winsound
 from collections import deque
 
@@ -14,7 +15,10 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from openai import OpenAI
+import learning
+import router
 import safety
+import vocabulary
 import session_memory
 from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from skills import notifications
@@ -35,12 +39,17 @@ FOLLOWUP_SECONDS = 6       # how long he keeps listening after he answers
 MAX_HISTORY = 8            # messages remembered during a conversation (4 exchanges)
 SHOW_IGNORED = True        # flash the panel red when he hears speech without his name
 BARGE_IN = True            # listen for "stop" while he is thinking or talking
+USE_ROUTER = True          # simple open/close/pause/next commands skip the model (False = the model decides everything)
 
 ALARM_ROUNDS = 36          # each round is about 5 seconds, so he rings for about 3 minutes before giving up
 # What you can say while an alarm rings. It has to be a short sentence made only of these words.
 ALARM_DISMISS = {"stop", "dismiss", "off", "awake", "up", "enough", "quiet", "cancel"}
 ALARM_FILLER = {"i", "i'm", "im", "am", "it", "the", "alarm", "please", "thanks", "thank", "you",
                 "okay", "ok", "alright", "turn", "now", "sir"}
+
+# Speech recognition. Bigger = understands accents and mumbling better, but answers a bit slower.
+#   "base.en" fast, basic  |  "small.en" good balance (try this first)  |  "medium.en" best on CPU, slow
+WHISPER_MODEL = "small.en"
 
 VOICE = "bm_fable"
 VOICE_SPEED = 1.0          # try 0.9 for a slower, calmer delivery
@@ -107,19 +116,62 @@ SYSTEM = (
 )
 
 def load_hint():
-    """Names Whisper should spell right: a few built in, plus anything in data/vocabulary.txt (one name per line)."""
+    """Names Whisper should spell right: a few built in, plus data/vocabulary.txt (yours, and the ones he added)."""
     names = ["Docker Desktop", "Ubuntu", "AmeFil", "Odoriko"]
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vocabulary.txt")
-    try:
-        with open(path, encoding="utf-8") as f:
-            names += [line.strip() for line in f if line.strip() and not line.startswith("#")]
-    except OSError:
-        pass
+    names += vocabulary.hint_names()                 # your names, plus the ones he added himself
     names = list(dict.fromkeys(names))[:40]          # Whisper only reads a short hint
     return "Jarvis, open and close apps, play music on YouTube. Names: " + ", ".join(names) + "."
 
 
 PROMPT_HINT = load_hint()
+
+
+def load_corrections():
+    """data/corrections.txt: one fix per line, written  what he wrongly heard = what you meant.
+    Example:   java is = Jarvis      odo rico = Odoriko"""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "corrections.txt")
+    pairs = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                wrong, right = (part.strip() for part in line.split("=", 1))
+                if wrong and right:
+                    pairs.append((re.compile(r"\b" + re.escape(wrong) + r"\b", re.IGNORECASE), right))
+    except OSError:
+        pass
+    return pairs
+
+
+CORRECTIONS = load_corrections()
+
+
+def save_correction(wrong, right):
+    """Add one fix to data/corrections.txt (and use it straight away)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "corrections.txt")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+        with open(path, "a", encoding="utf-8") as f:
+            if text and not text.endswith("\n"):
+                f.write("\n")
+            if "# learned automatically" not in text:
+                f.write("# learned automatically (delete any line you don't want)\n")
+            f.write(f"{wrong} = {right}\n")
+    except OSError as e:
+        print("[corrections] couldn't save:", e)
+    CORRECTIONS.append((re.compile(r"\b" + re.escape(wrong) + r"\b", re.IGNORECASE), right))
+
+
+learning.set_saver(save_correction)
+
+
+def apply_corrections(text):
+    for pattern, right in CORRECTIONS:
+        text = pattern.sub(lambda match, r=right: r, text)
+    return text
 
 
 def rms(block):
@@ -401,7 +453,7 @@ def transcribe(audio):
     )
     parts = list(segments)
     last_confidence = sum(s.avg_logprob for s in parts) / len(parts) if parts else 0.0
-    return " ".join(s.text.strip() for s in parts).strip()
+    return vocabulary.autocorrect(apply_corrections(" ".join(s.text.strip() for s in parts).strip()))
 
 
 def split_wake_word(text):
@@ -430,14 +482,51 @@ def brain_problem():
     return "My language model stopped answering, sir. It may have crashed on the graphics card. Try reloading it."
 
 
+def ask_llm(messages, force_tool=False):
+    """One request to LM Studio, with one quiet retry. Returns the response, or None if it won't answer.
+    force_tool=True tells the model it MUST call a tool (used when it just described an action instead of doing it)."""
+    for attempt in range(2):                      # LM Studio sometimes needs a moment after a hiccup
+        try:
+            extra = {"tool_choice": "required"} if (force_tool and attempt == 0) else {}
+            return client.chat.completions.create(model="local-model", messages=messages, tools=tools, **extra)
+        except Exception as e:
+            print(f"LM Studio error (try {attempt + 1}): {e}")
+            if not (force_tool and attempt == 0):
+                time.sleep(2)
+    return None
+
+
+# "Closing discord." and similar: the model describes an action instead of doing it
+_CLAIM = re.compile(r"^\W*(?:ok(?:ay)?\W+|sure\W+|certainly\W+)?(?:i(?:'m| am|'ll| will)\s+)?"
+                    r"(?:opening|closing|launching|starting|quitting|playing|refreshing|reloading|muting|"
+                    r"pausing|skipping|searching|restarting|shutting)\b", re.IGNORECASE)
+
+
+def claims_action(reply):
+    return bool(_CLAIM.match(reply or ""))
+
+
+def run_checked(name, arguments_json, text):
+    """Run a tool the same careful way the model's own calls run: ask first if it is risky.
+    Returns (reply, asked), where asked=True means the reply is a question and nothing ran."""
+    ask = safety.review(name, arguments_json, text, last_confidence)
+    if ask:
+        return ask, True
+    result = run_tool(name, arguments_json, text)
+    session_memory.record(text, name, arguments_json, result)
+    return result, False
+
+
 def handle(text, stream):
     body.set_state("thinking")
 
     # "Jarvis, stop" when nothing is running
     if is_stop(text):
         resolve_pending("stop")        # also ends any open question
+        learning.note_complaint()
         browser_refresh.cancel_pending()
         safety.cancel()
+        learning.cancel()
         undone = power.abort_pending()          # "stop" also cancels a shutdown that is counting down
         speak(undone or "Standing by, sir.", stream)
         return
@@ -456,6 +545,13 @@ def handle(text, stream):
     if verdict:
         speak(verdict, stream, error=looks_like_error(verdict))
         remember(text, verdict)
+        return
+
+    # His guess at a name you said ("did you mean Odoriko?"), or you correcting him ("no, I meant Odoriko")
+    fixed = learning.resolve_answer(text, run_checked) or learning.resolve_correction(text, run_checked)
+    if fixed:
+        speak(fixed, stream, error=looks_like_error(fixed))
+        remember(text, fixed)
         return
 
     # The answer to "which tab, or all of them?" after a refresh question
@@ -480,52 +576,79 @@ def handle(text, stream):
         remember(text, result)
         return
 
-    # The model also sees what he did recently, so "it", "that" and "the song" make sense
-    messages = [{"role": "system", "content": SYSTEM + session_memory.context_block()}] + history[-MAX_HISTORY:] + [
-        {"role": "user", "content": text}
-    ]
-    resp = None
-    for attempt in range(2):                      # one quiet retry: LM Studio sometimes needs a moment after a hiccup
-        try:
-            resp = client.chat.completions.create(model="local-model", messages=messages, tools=tools)
-            break
-        except Exception as e:
-            print(f"LM Studio error (try {attempt + 1}): {e}")
-            time.sleep(2)
-    if resp is None:
-        if cancel.is_set():        # you said stop while he was trying: stay quiet
+    # Plain "open discord" / "close spotify": do it directly, the model isn't needed
+    calls = None
+    quick = router.quick_call(text) if USE_ROUTER else None
+    if quick:
+        print(f"[router] {quick[0]} {quick[1]}")
+        calls = [SimpleNamespace(function=SimpleNamespace(name=quick[0], arguments=quick[1]))]
+
+    if not calls:
+        # The model also sees what he did recently, so "it", "that" and "the song" make sense
+        messages = [{"role": "system", "content": SYSTEM + session_memory.context_block()}] + history[-MAX_HISTORY:] + [
+            {"role": "user", "content": text}
+        ]
+        resp = ask_llm(messages)
+        if resp is None:
+            if cancel.is_set():        # you said stop while he was trying: stay quiet
+                return
+            speak(brain_problem(), stream, error=True)
             return
-        speak(brain_problem(), stream, error=True)
-        return
 
-    if cancel.is_set():            # you said stop while he was thinking: do nothing
-        return
+        if cancel.is_set():            # you said stop while he was thinking: do nothing
+            return
 
-    msg = resp.choices[0].message
-    if not msg.tool_calls:
-        reply = msg.content or "I'm not sure how to do that, sir."
-        speak(reply, stream)
-        if not cancel.is_set():
-            remember(text, reply)
-        return
+        msg = resp.choices[0].message
+        calls = msg.tool_calls
+        reply = msg.content or ""
+        if not calls and claims_action(reply):
+            # It said "Closing discord." in words but never called the tool. Ask once more, then be honest.
+            print(f"[model] said '{reply[:50]}' without calling a tool, asking again")
+            again = ask_llm(messages + [{"role": "assistant", "content": reply},
+                                        {"role": "user", "content": "You didn't call a tool, so nothing happened. "
+                                                                    "Call the right tool now."}],
+                             force_tool=True)
+            calls = again.choices[0].message.tool_calls if again else None
+            if not calls:
+                speak("I didn't manage to do that, sir. Could you say it again?", stream, error=True)
+                return
+        if not calls:
+            reply = reply or "I'm not sure how to do that, sir."
+            speak(reply, stream)
+            if not cancel.is_set():
+                remember(text, reply)
+            return
 
+    learning.note_command(text)
     results = []
-    for call in msg.tool_calls:
+    all_worked = True
+    for call in calls:
         if cancel.is_set():        # stop: skip the remaining actions
             break
-        ask = safety.review(call.function.name, call.function.arguments, text, last_confidence)
+        args_json = learning.rewrite(call.function.name, call.function.arguments)   # names he has learned
+        ask = safety.review(call.function.name, args_json, text, last_confidence)
         if ask:                    # risky, or he may have misheard: ask first, run nothing yet
             speak(ask, stream)
             remember(text, ask)
             return
-        result = run_tool(call.function.name, call.function.arguments, text)
-        session_memory.record(text, call.function.name, call.function.arguments, result)
+        result = run_tool(call.function.name, args_json, text)
+        session_memory.record(text, call.function.name, args_json, result)
+        guess = learning.after_tool(call.function.name, args_json, result)           # "did you mean ...?"
+        if guess:
+            speak(guess, stream)
+            remember(text, guess)
+            return
         results.append(result)
+        all_worked = all_worked and not looks_like_error(result)
         speak(result, stream, error=looks_like_error(result))
     if QUIT.is_set():              # he has said goodbye, now actually leave
         shutdown()
-    if not cancel.is_set():
-        remember(text, " ".join(results))
+    offer = learning.offer_repair(text, all_worked and not cancel.is_set())      # "shall I remember that...?"
+    if offer:
+        speak(offer, stream)
+        remember(text, offer)
+    # Not stored in the conversation: the action log already tells him what he did. Keeping "Pausing Spotify, sir."
+    # as a past answer teaches the model to reply in words instead of calling the tool.
 
 
 def run_command(command, stream, threshold):
@@ -550,6 +673,7 @@ def run_command(command, stream, threshold):
             stream.read(waiting)
         if cancel.is_set():
             history.clear()
+            learning.note_complaint()        # you cut him off, so the last action may have been a mistake
             resolve_pending("stop")          # forget any open question
             safety.cancel()
             power.abort_pending()            # stopping him mid-sentence also cancels a countdown
@@ -559,7 +683,9 @@ def run_command(command, stream, threshold):
 
 def followup_seconds():
     """Longer window while he waits for a yes or no, or while a shutdown can still be cancelled."""
-    return safety.CONFIRM_SECONDS if (safety.waiting() or power.counting_down()) else FOLLOWUP_SECONDS
+    if safety.waiting() or power.counting_down() or learning.waiting():
+        return safety.CONFIRM_SECONDS
+    return FOLLOWUP_SECONDS
 
 
 def follow_up(stream, threshold):
@@ -680,7 +806,7 @@ def jarvis_loop():
     try:
         body.set_state("thinking")
         body.set_jarvis("Loading models...")
-        stt = WhisperModel("base.en", device="cpu", compute_type="int8")
+        stt = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
         tts = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
 
         first_start = True

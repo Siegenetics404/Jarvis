@@ -22,8 +22,8 @@ SHOWN_ACTIONS = 5             # how many are shown to the model
 FORGET_TOOLS = {"get_time", "count_tabs", "quit_jarvis", "refresh_tab"}
 
 # Reply fragments that mean nothing was actually opened
-FAILED_HINTS = ("what should i play", "couldn't catch", "which tabs", "unknown tool", "failed",
-                "can't reach", "isn't running")
+FAILED_HINTS = ("what should i play", "couldn't", "which tabs", "unknown tool", "failed",
+                "can't reach", "isn't running", "can't tell")
 
 _actions = []
 _target = None                # set by a tool while it runs, e.g. play_youtube knows the exact video
@@ -99,6 +99,12 @@ def record(utterance, tool, arguments_json, result):
 def _fresh():
     now = time.monotonic()
     return [a for a in _actions if now - a["time"] <= MEMORY_SECONDS]
+
+
+def last_action():
+    """The newest remembered action (a dict with tool, args, result, time), or None."""
+    recent = _fresh()
+    return recent[-1] if recent else None
 
 
 def clear():
