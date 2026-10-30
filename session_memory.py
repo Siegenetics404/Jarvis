@@ -19,7 +19,7 @@ MAX_ACTIONS = 8               # how many actions are kept
 SHOWN_ACTIONS = 5             # how many are shown to the model
 
 # Tools that don't change what "it" means, so they are not remembered
-FORGET_TOOLS = {"get_time", "count_tabs", "quit_jarvis", "refresh_tab"}
+FORGET_TOOLS = {"get_time", "count_tabs", "quit_jarvis", "refresh_tab", "look_at_screen"}
 
 # Reply fragments that mean nothing was actually opened
 FAILED_HINTS = ("what should i play", "couldn't", "which tabs", "unknown tool", "failed",

@@ -1,7 +1,7 @@
 """Plain commands that don't need the language model.
 
 "open discord", "close spotify", "launch visual studio code", "open the luxara project",
-"pause the music", "resume", "next song", "play the music in Spotify"
+"pause the music", "resume", "next song", "play the music in Spotify", "what's on my screen"
 
 The local model sometimes answers "Closing discord." in words without actually calling the tool, or asks you a
 question instead of acting. For these simple commands the program can do it by itself: it checks the name against
@@ -26,6 +26,24 @@ _WEB_NAMES = {"youtube", "google", "gmail", "facebook", "github", "netflix", "tw
 
 ROUTE_AT = 0.70            # how alike the name must be to an installed app or project
 ROUTE_GAP = 0.12           # and how much better than the runner-up, otherwise the model decides
+
+
+# "What's on my screen?", "read this error", "what am I looking at?"
+_SCREEN_ASK = {"what", "whats", "what's", "read", "look", "see", "describe", "explain", "summarize", "summarise",
+               "tell", "check", "show", "scan"}
+
+
+def _screen_call(words, text):
+    ws = set(words)
+    if "screen" in ws and ws & _SCREEN_ASK and not ws & {"record", "recording", "brightness", "shot", "screenshot",
+                                                            "lock", "off", "turn", "mirror", "share", "saver"}:
+        return "look_at_screen", json.dumps({"question": text})
+    phrase = " ".join(words)
+    if phrase.startswith(("what am i looking at", "what do you see", "what can you see", "read this page",
+                          "summarize this page", "summarise this page", "what does this say",
+                          "what does this error say")):                 # "explain this error" stays with the clipboard skill
+        return "look_at_screen", json.dumps({"question": text})
+    return None
 
 
 # Pause, resume, next and previous song, and "play the music in Spotify"
@@ -73,8 +91,11 @@ def _best(heard, names):
 def quick_call(text):
     """Returns (tool, arguments_json) for a simple open/close command, or None to let the model decide."""
     words = re.findall(r"[a-z0-9']+", (text or "").lower())
-    if not words or len(words) > 7:
+    if not words or len(words) > 9:
         return None
+    screen = _screen_call(words, text)
+    if screen:
+        return screen
     media = _media_call(words)
     if media:
         return media
