@@ -33,16 +33,51 @@ _SCREEN_ASK = {"what", "whats", "what's", "read", "look", "see", "describe", "ex
                "tell", "check", "show", "scan"}
 
 
+_BROWSER_TITLE = re.compile(r"\s[-\u2013\u2014]\s(google chrome|microsoft edge|brave|opera|vivaldi)\b", re.IGNORECASE)
+_PAGE_STARTS = ("read this page", "read the page", "summarize this page", "summarise this page",
+                "summarize this article", "summarise this article", "read this article",
+                "what does this page say", "what is this page about", "whats this page about",
+                "what is on this page", "whats on this page", "what is this article about",
+                "what does this article say", "read what i selected", "read the selected", "read my selection",
+                "read what i highlighted", "what did claude say", "read claude")
+_MESSAGE_WORDS = {"message", "messages", "email", "emails", "chat", "notification", "notifications",
+                  "reply", "response", "answer"}
+
+
+def _foreground_title():
+    """The title of the window you are using, so he knows if you are in a web browser."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        handle = user32.GetForegroundWindow()
+        buffer = ctypes.create_unicode_buffer(user32.GetWindowTextLengthW(handle) + 1)
+        user32.GetWindowTextW(handle, buffer, len(buffer))
+        return buffer.value
+    except Exception:
+        return ""
+
+
+def _reader(question):
+    """Reading something you are looking at: the page text from the browser, or the screen if it isn't a browser."""
+    tool = "read_page" if _BROWSER_TITLE.search(_foreground_title()) else "look_at_screen"
+    return tool, json.dumps({"question": question})
+
+
 def _screen_call(words, text):
     ws = set(words)
+    phrase = " ".join(words)
     if "screen" in ws and ws & _SCREEN_ASK and not ws & {"record", "recording", "brightness", "shot", "screenshot",
                                                             "lock", "off", "turn", "mirror", "share", "saver"}:
-        return "look_at_screen", json.dumps({"question": text})
-    phrase = " ".join(words)
-    if phrase.startswith(("what am i looking at", "what do you see", "what can you see", "read this page",
-                          "summarize this page", "summarise this page", "what does this say",
-                          "what does this error say")):                 # "explain this error" stays with the clipboard skill
-        return "look_at_screen", json.dumps({"question": text})
+        return "look_at_screen", json.dumps({"question": text})              # the whole screen, always
+    if phrase.startswith(_PAGE_STARTS):
+        return _reader(text)
+    if ws & _MESSAGE_WORDS and \
+            (words[0] == "read" or phrase.startswith(("what does", "what do", "what is the", "whats the", "what's the"))) \
+            and not ws & {"send", "write", "reply", "delete", "open", "close", "set", "remind", "play", "tell"}:
+        return _reader(text)
+    if phrase.startswith(("what am i looking at", "what do you see", "what can you see", "what does this say",
+                          "what does this error say")):                       # "explain this error" stays with the clipboard skill
+        return _reader(text)
     return None
 
 

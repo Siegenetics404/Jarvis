@@ -140,6 +140,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // the answer comes a moment later
 });
 
+// Runs inside the web page: returns what you selected and the page's text
+function extractPage() {
+  const selection = String(window.getSelection() || "").trim();
+  let root =
+    document.querySelector("main, [role=main], article") || document.body;
+  let text = (root.innerText || "").trim();
+  if (text.length < 200 && root !== document.body)
+    text = (document.body.innerText || "").trim(); // the "main" part was nearly empty, use the whole page
+  text = text.replace(/\n{3,}/g, "\n\n");
+  if (text.length > 80000)
+    text = text.slice(0, 40000) + "\n...\n" + text.slice(-40000); // keep the start and the end
+  return { selection: selection.slice(0, 20000), text };
+}
+
 async function handle(msg) {
   if (msg.action === "list_tabs") {
     const tabs = await chrome.tabs.query({});
@@ -157,6 +171,26 @@ async function handle(msg) {
     return {
       tab: tab ? { id: tab.id, title: tab.title, url: tab.url } : null,
     };
+  }
+
+  // The text of the page you are looking at, so Jarvis can read or summarize it (no screenshot needed)
+  if (msg.action === "page_text") {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true,
+    });
+    if (!tab) return { error: "no_tab" };
+    if (!/^(https?|file):/.test(tab.url || ""))
+      return { error: "cannot_read", title: tab.title, reason: "browser page" };
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: extractPage,
+      });
+      return { title: tab.title, url: tab.url, ...result };
+    } catch (e) {
+      return { error: "cannot_read", title: tab.title, reason: String(e) };
+    }
   }
 
   // Refresh exactly the tabs Jarvis chose, by ID (hard = skip the cache)
