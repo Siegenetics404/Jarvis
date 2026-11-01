@@ -85,10 +85,16 @@ def _email_call(words, text):
                                   "what are my", "whats in my", "what's in my", "tell me my", "what new",
                                   "what emails", "whats new in my"))
         if asks and not ws & {"send", "write", "draft", "compose", "reply"}:
-            return "read_emails", "{}"
+            return "read_emails", json.dumps({"category": text})
         if words[0] in {"read", "open"} and ws & ({"from", "first", "second", "third", "fourth", "fifth", "latest",
                                                    "newest", "number", "about", "full", "whole"}):
             return "read_email", json.dumps({"which": text})
+    categories = ws & {"primary", "social", "promotions", "promotion", "promotional", "promos", "updates", "forums"}
+    if categories and not mailbox and phrase.startswith(("check", "any", "do i have", "read my", "how many",
+                                                         "what", "whats", "anything", "show", "tell me")):
+        return "read_emails", json.dumps({"category": text})
+    if ("categories" in ws or "category" in ws) and ws & {"email", "emails", "mail", "unread", "inbox"}:
+        return "read_emails", json.dumps({"category": text})
     if words[0] == "read" and ws & {"first", "second", "third"} and ws & {"one", "email", "mail"} and "this" not in ws:
         return "read_email", json.dumps({"which": text})
     if phrase in {"read it in full", "read the whole email", "read the full email", "read it all", "read the whole thing",

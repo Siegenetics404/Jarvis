@@ -1,6 +1,7 @@
 """Email by voice: check your inbox, write drafts with the local model, and send only after you confirm.
 
   "Do I have any new emails?"            "Read the first one"           "Read the email from Maria"
+  "Any new emails in promotions?"        "How many unread in each category?"
   "Email Maria that I'll be late"        "Make it shorter"              "Send it"   (then say "confirm")
   "Save it as a draft"                   "Reply to this email saying yes, Friday works"
 
@@ -15,6 +16,9 @@ How it works
   - Email text is untrusted (anyone can write you anything). It is only read out loud or summarized by a
     separate model call that has no tools, so a hostile email can't make Jarvis do anything.
   - Reading doesn't mark emails as read.
+  - Gmail categories (Primary, Social, Promotions, Updates, Forums) work with Gmail. "New emails" means your
+    Primary category by default, so promotions don't bury the real ones. Say "all my emails" for everything, or
+    set EMAIL_DEFAULT_CATEGORY in .env.
 """
 import html
 import imaplib
@@ -92,11 +96,38 @@ def _config():
         "imap": env.get("EMAIL_IMAP_HOST", "imap.gmail.com").strip(),
         "smtp": env.get("EMAIL_SMTP_HOST", "smtp.gmail.com").strip(),
         "port": int(env.get("EMAIL_SMTP_PORT", "465") or 465),
+        "category": (env.get("EMAIL_DEFAULT_CATEGORY") or
+                     ("primary" if "gmail" in env.get("EMAIL_IMAP_HOST", "imap.gmail.com").lower() else "all")
+                     ).strip().lower(),
     }
 
 
 def configured():
     return _config() is not None
+
+
+CATEGORIES = ("primary", "social", "promotions", "updates", "forums")
+_CATEGORY_WORDS = {"primary": "primary", "main": "primary", "social": "social", "promotions": "promotions",
+                   "promotion": "promotions", "promotional": "promotions", "promo": "promotions",
+                   "promos": "promotions", "updates": "updates", "update": "updates", "forums": "forums",
+                   "forum": "forums"}
+
+
+def _gmail(cfg):
+    return "gmail" in cfg["imap"].lower() or "googlemail" in cfg["imap"].lower()
+
+
+def _category_from(text, cfg):
+    """Which category did you ask about? 'primary', 'social', ... 'all', 'summary' (each one), or '' for the default."""
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    if set(words) & {"each", "categories", "breakdown", "every"} and "category" not in words[:1]:
+        return "summary"
+    for word in words:
+        if word in _CATEGORY_WORDS:
+            return _CATEGORY_WORDS[word]
+    if "all" in words or "everything" in words or "every" in words:
+        return "all"
+    return ""
 
 
 def _contacts():
@@ -429,13 +460,16 @@ def _body_text(raw):
     return message, cleaned[:READ_BODY_CHARS]
 
 
-def _load_inbox(cfg, unread=True, sender=None):
-    """Fill _inbox with up to INBOX_LIMIT emails, newest first. Returns how many unread there are."""
+def _load_inbox(cfg, unread=True, sender=None, category="all"):
+    """Fill _inbox with up to INBOX_LIMIT emails, newest first. Returns how many unread there are.
+    category is a Gmail category like 'primary', or 'all'."""
     global _inbox
     found, unread_total = [], 0
     with _connect(cfg) as mail:
         mail.select("INBOX", readonly=True)                       # read only: nothing gets marked as read
         criteria = ["UNSEEN"] if unread else ["ALL"]
+        if category in CATEGORIES and _gmail(cfg):
+            criteria += ["X-GM-RAW", f'"category:{category}"']    # Gmail's own search, the same as typing it in Gmail
         if sender:
             criteria += ["FROM", f'"{sender}"']
         status, data = mail.uid("search", None, *criteria)
@@ -458,24 +492,43 @@ def _short_subject(subject):
     return " ".join(re.sub(r"^(re|fwd?)\s*:\s*", "", subject, flags=re.IGNORECASE).split()[:8])
 
 
-def read_emails():
+def _category_counts(cfg):
+    counts = {}
+    with _connect(cfg) as mail:
+        mail.select("INBOX", readonly=True)
+        for category in CATEGORIES:
+            status, data = mail.uid("search", None, "UNSEEN", "X-GM-RAW", f'"category:{category}"')
+            counts[category] = len((data[0] or b"").split())
+    return counts
+
+
+def read_emails(category=""):
     cfg = _config()
     if not cfg:
         print(SETUP_STEPS)
         return NOT_SET
+    chosen = _category_from(category, cfg) or cfg["category"]
+    note = ""
+    if chosen in CATEGORIES + ("summary",) and not _gmail(cfg):
+        note, chosen = "Categories only work with Gmail, sir. ", "all"
     try:
-        unread_total = _load_inbox(cfg, unread=True)
+        if chosen == "summary":
+            counts = _category_counts(cfg)
+            parts = [f"{n} in {c}" for c, n in counts.items() if n]
+            return ("Unread: " + ", ".join(parts) + ", sir.") if parts else "No unread emails in any category, sir."
+        unread_total = _load_inbox(cfg, unread=True, category=chosen)
     except imaplib.IMAP4.error:
         return "My email login was refused, sir. Please check the app password in the dot env file."
     except Exception as e:
         print("[email] couldn't check the inbox:", e)
         return "I couldn't reach your email, sir."
+    place = f" in {chosen}" if chosen in CATEGORIES else ""
     if not _inbox:
-        return "No new emails, sir."
+        return f"{note}No new emails{place}, sir."
     names = [f"{m['name']}, about {_short_subject(m['subject'])}" for m in _inbox[:SPOKEN_EMAILS]]
-    count = f"{unread_total} new email{'s' if unread_total != 1 else ''}"
+    count = f"{unread_total} new email{'s' if unread_total != 1 else ''}{place}"
     more = " Say read the first one, or read the email from someone." if unread_total else ""
-    return f"You have {count}, sir. The newest: " + "; ".join(names) + "." + more
+    return f"{note}You have {count}, sir. The newest: " + "; ".join(names) + "." + more
 
 
 _ORDINALS = {"first": 0, "1st": 0, "one": 0, "latest": 0, "newest": 0, "last": 0, "second": 1, "2nd": 1, "two": 1,
@@ -499,9 +552,10 @@ def read_email(which=""):
 
     try:
         if not _inbox:
-            _load_inbox(cfg, unread=True)
+            default = cfg["category"] if _gmail(cfg) else "all"
+            _load_inbox(cfg, unread=True, category=default)
             if not _inbox:
-                _load_inbox(cfg, unread=False)
+                _load_inbox(cfg, unread=False, category=default)
         chosen = None
         if names:                                                 # "the email from Maria"
             for item in _inbox:
@@ -585,7 +639,8 @@ def reply_email(request=""):
 HINT = ("Email: use draft_email to write an email to someone in the user's contacts (pass the user's whole request "
         "as they said it), revise_draft to change the draft, send_email ONLY when the user says to send the current "
         "draft, save_draft to save it to the drafts folder, discard_draft to throw it away, read_emails to say "
-        "what is new in the inbox, read_email to read one email, and reply_email to reply to the email just read.")
+        "what is new in the inbox (pass the category if they name one: primary, social, promotions, updates or "
+        "forums), read_email to read one email, and reply_email to reply to the email just read.")
 
 SCHEMAS = [
     tool("draft_email", "Write an email to someone in the user's contacts. It becomes a draft that is read back; "
@@ -596,7 +651,11 @@ SCHEMAS = [
     tool("save_draft", "Save the current email draft to the user's drafts folder without sending it."),
     tool("discard_draft", "Throw away the current email draft."),
     tool("read_draft", "Read the current email draft back to the user."),
-    tool("read_emails", "Say how many new emails there are and who sent the newest ones."),
+    tool("read_emails", "Say how many new emails there are and who sent the newest ones, in Gmail's Primary "
+         "category unless the user names another.",
+         {"category": "primary, social, promotions, updates, forums, all, or each (for a count per category). "
+                      "Leave empty for the default."},
+         optional=("category",)),
     tool("read_email", "Read or summarize one email from the inbox, for example the first one, or the one from a "
          "person.", {"which": "Which one, in the user's words, such as 'the first one' or 'from Maria'"},
          optional=("which",)),
