@@ -28,6 +28,75 @@ ROUTE_AT = 0.70            # how alike the name must be to an installed app or p
 ROUTE_GAP = 0.12           # and how much better than the runner-up, otherwise the model decides
 
 
+# Email: "email Maria that I'll be late", "send it", "do I have new emails?", "read the first one"
+_DRAFT_STARTS = ("send an email", "send a email", "send email", "draft an email", "draft a email", "draft email",
+                 "write an email", "write a email", "write email", "compose an email", "compose email")
+_REVISE_VERBS = {"change", "make", "add", "remove", "rewrite", "shorten", "lengthen", "fix", "replace", "edit",
+                 "update", "include", "mention", "reword", "rephrase", "delete", "swap"}
+_REVISE_TARGETS = {"it", "email", "draft", "subject", "greeting", "ending", "tone", "shorter", "longer", "formal",
+                   "casual", "polite", "friendlier", "that", "line", "sentence", "body", "sign", "signoff"}
+
+
+def _email_module():
+    try:
+        import importlib
+        module = importlib.import_module("skills.email_assistant")
+        return module if module.configured() else None
+    except Exception:
+        return None
+
+
+def _email_call(words, text):
+    ws = set(words)
+    phrase = " ".join(words)
+    mail = _email_module()
+    if mail is None:
+        return None
+
+    if phrase.startswith(_DRAFT_STARTS) or (words[0] == "email" and len(words) >= 3):
+        return "draft_email", json.dumps({"request": text})
+    if mail.has_read_email() and phrase.startswith(("reply to this email", "reply to that email", "reply to the email",
+                                                    "reply to him", "reply to her", "reply saying", "reply that",
+                                                    "reply with", "respond to this email", "respond to that email",
+                                                    "write back")):
+        return "reply_email", json.dumps({"request": text})
+
+    if mail.drafting():
+        if phrase in {"send it", "send the email", "send that", "send this email", "send the draft", "yes send it",
+                      "go ahead and send it", "send it now", "send it please", "please send it", "send this"}:
+            return "send_email", "{}"
+        if phrase.startswith(("save it as a draft", "save the draft", "save this draft", "save it to drafts",
+                              "save as draft", "save it as draft")):
+            return "save_draft", "{}"
+        if phrase.startswith(("discard the draft", "delete the draft", "discard it", "forget the draft",
+                              "forget the email", "cancel the email", "cancel the draft", "throw away the draft",
+                              "discard the email", "scrap the draft", "scrap it")):
+            return "discard_draft", "{}"
+        if phrase.startswith(("read the draft", "read it back", "read that back", "read the email back",
+                              "read it again", "what does the draft say")):
+            return "read_draft", "{}"
+        if words[0] in _REVISE_VERBS and (ws & _REVISE_TARGETS or phrase.startswith(("add that", "mention that",
+                                                                                    "include that"))):
+            return "revise_draft", json.dumps({"instruction": text})
+
+    mailbox = ws & {"email", "emails", "mail", "inbox"}
+    if mailbox and "this" not in ws:
+        asks = phrase.startswith(("do i have", "any new", "any unread", "check my", "check the", "how many", "read my",
+                                  "what are my", "whats in my", "what's in my", "tell me my", "what new",
+                                  "what emails", "whats new in my"))
+        if asks and not ws & {"send", "write", "draft", "compose", "reply"}:
+            return "read_emails", "{}"
+        if words[0] in {"read", "open"} and ws & ({"from", "first", "second", "third", "fourth", "fifth", "latest",
+                                                   "newest", "number", "about", "full", "whole"}):
+            return "read_email", json.dumps({"which": text})
+    if words[0] == "read" and ws & {"first", "second", "third"} and ws & {"one", "email", "mail"} and "this" not in ws:
+        return "read_email", json.dumps({"which": text})
+    if phrase in {"read it in full", "read the whole email", "read the full email", "read it all", "read the whole thing",
+                  "read the full thing"} and mail.has_read_email():
+        return "read_email", json.dumps({"which": "full"})
+    return None
+
+
 # "What's on my screen?", "read this error", "what am I looking at?"
 _SCREEN_ASK = {"what", "whats", "what's", "read", "look", "see", "describe", "explain", "summarize", "summarise",
                "tell", "check", "show", "scan"}
@@ -128,6 +197,9 @@ def quick_call(text):
     words = re.findall(r"[a-z0-9']+", (text or "").lower())
     if not words or len(words) > 9:
         return None
+    email = _email_call(words, text)
+    if email:
+        return email
     screen = _screen_call(words, text)
     if screen:
         return screen

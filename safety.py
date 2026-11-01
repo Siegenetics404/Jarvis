@@ -3,7 +3,7 @@
 Before a risky tool runs, he asks first and waits for your answer. This is plain code, so the language model
 can't talk its way past it.
 
-  HIGH risk    (power_action: shut down, restart, sleep, sign out)
+  HIGH risk    (power_action: shut down, restart, sleep, sign out; sending an email)
                Always asks, and a bare "yes" is NOT enough: you must say "confirm" (or "do it" / "go ahead").
                A TV or a stray "yes" in the room can't switch your PC off.
   MEDIUM risk  (closing a program that may hold unsaved work, like Word or Chrome)
@@ -40,6 +40,7 @@ _NO = {"no", "nope", "cancel", "stop", "nevermind", "don't", "dont", "never", "a
 _GLUE = {"sir", "jarvis", "do", "it", "go", "ahead", "and", "i", "the", "that", "yes", "please", "now"}
 
 approved = False              # True only while a confirmed tool is running. Risky tools check this too.
+describers = {}               # skills register {"tool name": function(args) -> question or None} for HIGH-risk tools
 _pending = None
 
 
@@ -78,6 +79,11 @@ def review(name, arguments_json, utterance, confidence):
             return None                      # the tool itself will say it doesn't know that one
         level = "high"
         question = f"{phrase}, sir? Say confirm to go ahead, or anything else to cancel."
+    elif name in describers:
+        question = describers[name](args)
+        if not question:
+            return None                      # nothing to confirm (the tool itself will explain)
+        level = "high"
     elif name == "close_app":
         app = _short_app(args.get("name"))
         if any(k in app.lower() for k in CONFIRM_CLOSE):

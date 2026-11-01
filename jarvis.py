@@ -24,6 +24,7 @@ from actions import run_tool, resolve_pending, TOOL_SCHEMAS, QUIT
 from skills import notifications
 from skills import browser_refresh
 from skills import power
+from skills import email_assistant
 
 BODY = "orb"               # "orb" = the glass orb (needs Node, see body-ui), "classic" = the original panel
 
@@ -685,6 +686,8 @@ def followup_seconds():
     """Longer window while he waits for a yes or no, or while a shutdown can still be cancelled."""
     if safety.waiting() or power.counting_down() or learning.waiting():
         return safety.CONFIRM_SECONDS
+    if email_assistant.drafting():              # a draft is waiting for "send it", "make it shorter" or "discard it"
+        return 15
     return FOLLOWUP_SECONDS
 
 
