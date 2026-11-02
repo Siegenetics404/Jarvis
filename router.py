@@ -37,21 +37,53 @@ _REVISE_TARGETS = {"it", "email", "draft", "subject", "greeting", "ending", "ton
                    "casual", "polite", "friendlier", "that", "line", "sentence", "body", "sign", "signoff"}
 
 
-def _email_module():
+def _email_module(need_account=True):
     try:
         import importlib
         module = importlib.import_module("skills.email_assistant")
-        return module if module.configured() else None
+        return module if (not need_account or module.configured()) else None
     except Exception:
         return None
+
+
+_SETUP_PHRASES = ("set up my email", "setup my email", "set up email", "setup email", "set up my gmail",
+                  "set up my mail", "email settings", "open email settings", "open my email settings",
+                  "connect my email", "connect my gmail", "connect email", "change my email", "change my email account",
+                  "change my email settings", "add my email", "add my email account", "configure my email",
+                  "configure email", "email setup", "log in to my email", "login to my email")
 
 
 def _email_call(words, text):
     ws = set(words)
     phrase = " ".join(words)
+    status_words = ws & {"connected", "connection", "connect", "working", "successfully", "status", "works",
+                         "linked", "logged"} or phrase.startswith(("test my email", "test my gmail", "test email",
+                                                                   "test the email"))
+    if ws & {"email", "gmail", "mail", "inbox"} and status_words and \
+            phrase.startswith(("is my", "is the", "is gmail", "is email", "did my", "does my", "are my", "am i", "check",
+                               "test", "how is", "what is the status", "whats the status", "what's the status",
+                               "has my", "do i")):
+        if _email_module(need_account=False) is not None:           # also works before an account is connected
+            return "email_status", "{}"
+    if phrase.startswith(_SETUP_PHRASES) or phrase in {"set up email", "setup email"}:
+        if _email_module(need_account=False) is not None:           # works before any account is connected
+            return "setup_email", "{}"
     mail = _email_module()
     if mail is None:
         return None
+
+    # Contacts: "save the sender as a contact", "save the copied email as Maria", "remove Maria from my contacts"
+    if ws & {"contact", "contacts"} or phrase.startswith(("save the sender", "save this sender", "save the copied",
+                                                          "add the copied", "save the email address",
+                                                          "save them as", "save him as", "save her as",
+                                                          "add the sender")):
+        if phrase.startswith(("who are my", "list my", "show my", "read my", "what are my", "what contacts",
+                              "how many contacts", "do i have any contacts", "who is in my")):
+            return "list_contacts", "{}"
+        if words[0] in {"remove", "delete", "forget"}:
+            return "remove_contact", json.dumps({"request": text})
+        if words[0] in {"add", "save", "make", "put"}:
+            return "save_contact", json.dumps({"request": text})
 
     if phrase.startswith(_DRAFT_STARTS) or (words[0] == "email" and len(words) >= 3):
         return "draft_email", json.dumps({"request": text})
@@ -79,9 +111,22 @@ def _email_call(words, text):
                                                                                     "include that"))):
             return "revise_draft", json.dumps({"instruction": text})
 
+    sure_words = ws & {"spam", "junk", "trash", "drafts", "snoozed"}                    # only ever mean mail folders
+    maybe_words = ws & {"bin", "important", "starred", "flagged", "sent"}               # need a mail word as well
+    mail_context = ws & {"email", "emails", "mail", "mails", "inbox", "messages", "folder"}
+    folder_word = sure_words or (maybe_words and mail_context) or "all mail" in phrase
+    if folder_word and phrase.startswith(("how many", "do i have", "is there", "are there", "any", "check", "what",
+                                          "whats", "show", "read", "list", "open", "tell me", "did i", "anything",
+                                          "empty", "delete", "clear", "remove")) \
+            and not ws & {"send", "write", "compose", "reply", "play", "set"}:
+        return "check_folder", json.dumps({"where": text})
+    if re.search(r"\b(did i send|have i sent|i sent|did i email|have i emailed|who did i email|what have i sent)\b",
+                 phrase):
+        return "check_folder", json.dumps({"where": text})
     mailbox = ws & {"email", "emails", "mail", "inbox"}
     if mailbox and "this" not in ws:
         asks = phrase.startswith(("do i have", "any new", "any unread", "check my", "check the", "how many", "read my",
+                                  "show my", "show me my", "list my", "what are my latest", "my latest",
                                   "what are my", "whats in my", "what's in my", "tell me my", "what new",
                                   "what emails", "whats new in my"))
         if asks and not ws & {"send", "write", "draft", "compose", "reply"}:
@@ -201,11 +246,13 @@ def _best(heard, names):
 def quick_call(text):
     """Returns (tool, arguments_json) for a simple open/close command, or None to let the model decide."""
     words = re.findall(r"[a-z0-9']+", (text or "").lower())
-    if not words or len(words) > 9:
+    if not words:
         return None
-    email = _email_call(words, text)
+    email = _email_call(words, text)          # emails can be long ("email Maria that I'll be late and ask...")
     if email:
         return email
+    if len(words) > 9:
+        return None
     screen = _screen_call(words, text)
     if screen:
         return screen

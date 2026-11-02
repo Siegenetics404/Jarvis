@@ -2,16 +2,19 @@
 
   "Do I have any new emails?"            "Read the first one"           "Read the email from Maria"
   "Any new emails in promotions?"        "How many unread in each category?"
+  "How many spam do I have?"             "Is there anything in the bin?"      "What's in my drafts?"
+  "What did I send to Maria?"            "Any important emails?"              "What's snoozed?"
   "Email Maria that I'll be late"        "Make it shorter"              "Send it"   (then say "confirm")
   "Save it as a draft"                   "Reply to this email saying yes, Friday works"
 
 How it works
   - It uses plain IMAP and SMTP with an app password, so it works with Gmail and most providers without
-    any Google Cloud setup. Put the login in the .env file (see .env.example). The password never leaves your PC
-    and is never printed or saved anywhere else.
+    any Google Cloud setup. Say "Jarvis, set up my email" and a settings window opens: no files to edit.
+    The password never leaves your PC (it is kept in Windows' password store when 'keyring' is installed).
   - Drafts are written by your local model. Nothing is sent to any AI service.
-  - You can only email people listed in data/contacts.txt, or reply to someone who emailed you. He never sends
-    to an address he heard spoken, because speech recognition gets addresses wrong.
+  - You can only email your saved contacts, or reply to someone who emailed you. He never sends to an address
+    he heard spoken, because speech recognition gets addresses wrong. Add contacts in the settings window, or say
+    "save the sender as a contact" after he reads an email, or copy an address and say "save the copied email as Maria".
   - SENDING always asks first: he reads out who it goes to, and you must say "confirm".
   - Email text is untrusted (anyone can write you anything). It is only read out loud or summarized by a
     separate model call that has no tools, so a hostile email can't make Jarvis do anything.
@@ -25,21 +28,21 @@ import imaplib
 import re
 import smtplib
 import time
+from datetime import date, datetime, timedelta
 from email import message_from_bytes, policy
 from email.header import decode_header, make_header
 from email.message import EmailMessage
-from email.utils import formataddr, formatdate, make_msgid, parseaddr
+from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate_to_datetime
 from pathlib import Path
 
 from openai import OpenAI
 
+import email_config
 import learning
 import safety
 from skills import tool
 
 ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = ROOT / ".env"
-CONTACTS_FILE = ROOT / "data" / "contacts.txt"
 
 LM_URL = "http://localhost:1234/v1"
 MODEL = "local-model"
@@ -57,53 +60,28 @@ _draft = None                 # {"to_name", "to_addr", "subject", "body", "time"
 _inbox = []                   # recent emails, newest first: {"uid", "name", "addr", "subject", "date"}
 _last_read = None             # the email you last had read: {"name", "addr", "subject", "body", "message_id"}
 
-NOT_SET = "Email isn't set up yet, sir. The terminal has the steps."
-SETUP_STEPS = """[email] Email isn't set up. To turn it on:
-  1. Copy .env.example to .env in the Jarvis folder.
-  2. Fill in EMAIL_ADDRESS and EMAIL_APP_PASSWORD. For Gmail, turn on 2-Step Verification, then create an
-     "App password" at https://myaccount.google.com/apppasswords (it is 16 letters).
-  3. Copy data/contacts.example.txt to data/contacts.txt and add the people you email.
-  4. Restart Jarvis."""
+NOT_SET = "Email isn't set up yet, sir. Say set up my email, and I'll open the settings window."
+SETUP_STEPS = "[email] Email isn't set up. Say \"Jarvis, set up my email\", or run: python email_setup.py"
 
 
 # ------------------------------------------------------------------ settings and contacts
 
-def _env():
-    values = {}
-    try:
-        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return values
-
-
 def _config():
-    env = _env()
-    address = env.get("EMAIL_ADDRESS", "").strip()
-    password = env.get("EMAIL_APP_PASSWORD", "").replace(" ", "")
-    if not address or not password:
-        return None
-    return {
-        "address": address,
-        "password": password,
-        "name": env.get("EMAIL_NAME", "").strip(),
-        "signature": (env.get("EMAIL_SIGNATURE") or env.get("EMAIL_NAME") or "").strip(),
-        "imap": env.get("EMAIL_IMAP_HOST", "imap.gmail.com").strip(),
-        "smtp": env.get("EMAIL_SMTP_HOST", "smtp.gmail.com").strip(),
-        "port": int(env.get("EMAIL_SMTP_PORT", "465") or 465),
-        "category": (env.get("EMAIL_DEFAULT_CATEGORY") or
-                     ("primary" if "gmail" in env.get("EMAIL_IMAP_HOST", "imap.gmail.com").lower() else "all")
-                     ).strip().lower(),
-    }
+    return email_config.load()
 
 
 def configured():
     return _config() is not None
+
+
+_DISPLAY = {}                  # lower-case contact name -> the way you wrote it ("CJ", "McDonald")
+
+
+def _contacts():
+    """{name: address} from your saved contacts. Read fresh every time, so changes apply at once."""
+    _DISPLAY.clear()
+    _DISPLAY.update(email_config.display_names())
+    return email_config.contacts()
 
 
 CATEGORIES = ("primary", "social", "promotions", "updates", "forums")
@@ -130,22 +108,6 @@ def _category_from(text, cfg):
     return ""
 
 
-def _contacts():
-    """{name: address} from data/contacts.txt, one 'name = address' per line. Read fresh every time."""
-    found = {}
-    try:
-        for line in CONTACTS_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, address = (part.strip() for part in line.split("=", 1))
-            if name and "@" in address:
-                found[name.lower()] = address.split(",")[0].strip()
-    except OSError:
-        pass
-    return found
-
-
 _NAME_SKIP = {"that", "about", "saying", "regarding", "asking", "to", "and", "the", "a", "an", "i", "i'll", "i'm",
               "please", "tell", "say", "ask", "him", "her", "them"}
 
@@ -154,12 +116,15 @@ def _find_contact(request):
     """Which contact does the sentence start with? Returns (name, address, problem). Names that sound alike match."""
     contacts = _contacts()
     if not contacts:
-        return None, None, "You don't have any contacts yet, sir. Add them to data slash contacts dot text."
+        return None, None, "You don't have any contacts yet, sir. Say set up my email to add some."
     text = re.sub(r"^\W*(?:please\s+)?(?:send|draft|write|compose)?\s*(?:an?\s+)?(?:email|mail)\s*(?:to\s+)?", "",
                   (request or "").lower())
     heard = [w for w in re.findall(r"[a-z']+", text)[:3] if w not in _NAME_SKIP]
     if not heard:
         return None, None, "Who should I email, sir?"
+    exact = [n for n in contacts if n in heard or n == " ".join(heard[:len(n.split())])]
+    if len(exact) == 1:                                           # you said a full contact name exactly: no guessing
+        return _DISPLAY.get(exact[0], exact[0].title()), contacts[exact[0]], None
     scored = []
     for name, address in contacts.items():
         parts = name.split()
@@ -175,9 +140,9 @@ def _find_contact(request):
         return None, None, f"I don't have {heard[0]} in your contacts, sir."
     close = [s for s in scored if top[0] - s[0] < 0.05]
     if len(close) > 1:
-        names = " and ".join(n.title() for _, n, _ in close[:3])
+        names = " and ".join(_DISPLAY.get(n, n.title()) for _, n, _ in close[:3])
         return None, None, f"I have more than one match, sir: {names}. Which one?"
-    return top[1].title(), top[2], None
+    return _DISPLAY.get(top[1], top[1].title()), top[2], None
 
 
 # ------------------------------------------------------------------ talking to the local model
@@ -358,11 +323,17 @@ def send_email():
     if not cfg:
         return NOT_SET
     try:
-        with smtplib.SMTP_SSL(cfg["smtp"], cfg["port"], timeout=30) as smtp:
-            smtp.login(cfg["address"], cfg["password"])
-            smtp.send_message(_build_message(draft, cfg))
+        if cfg["port"] == 587:                                    # some providers (iCloud) upgrade to a secure link
+            with smtplib.SMTP(cfg["smtp"], 587, timeout=30) as smtp:
+                smtp.starttls()
+                smtp.login(cfg["address"], cfg["password"])
+                smtp.send_message(_build_message(draft, cfg))
+        else:
+            with smtplib.SMTP_SSL(cfg["smtp"], cfg["port"], timeout=30) as smtp:
+                smtp.login(cfg["address"], cfg["password"])
+                smtp.send_message(_build_message(draft, cfg))
     except smtplib.SMTPAuthenticationError:
-        return "My email login was refused, sir. Please check the app password in the dot env file."
+        return "My email login was refused, sir. Say set up my email to check the app password."
     except Exception as e:
         print("[email] couldn't send:", e)
         return "I couldn't send it, sir. The draft is still here."
@@ -460,11 +431,71 @@ def _body_text(raw):
     return message, cleaned[:READ_BODY_CHARS]
 
 
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+WINDOWS = (14, 60, 365, None)      # how far back he looks for the newest emails: days, widening until there are enough
+CANDIDATES = 80                    # most emails he reads the dates of when sorting
+
+
+def _since(days):
+    """IMAP date text like 17-Oct-2026 (always English month names)."""
+    day = date.today() - timedelta(days=days)
+    return f"{day.day:02d}-{_MONTHS[day.month - 1]}-{day.year}"
+
+
+def _timestamp(value):
+    try:
+        return parsedate_to_datetime(value).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _newest_uids(mail, criteria):
+    """UIDs matching the search, looking at recent mail first and widening until there are enough.
+    (An email's IMAP number is the order it entered the folder, not the date it was sent, so numbers alone can't
+    tell which is newest. The caller sorts the result by the real date.)"""
+    uids = []
+    for days in WINDOWS:
+        window = list(criteria) + (["SINCE", _since(days)] if days else [])
+        status, data = mail.uid("search", None, *window)
+        uids = (data[0] or b"").split()
+        if len(uids) >= INBOX_LIMIT or days is None:
+            break
+    return uids
+
+
+def _fetch_items(mail, uids, folder, show_to=False):
+    """One request for the headers of many emails, as a list sorted newest first by the real date.
+    show_to=True shows who an email was sent TO (for the sent and drafts folders) instead of who it is from."""
+    found = []
+    chosen = uids[-CANDIDATES:]
+    if chosen:
+        status, parts = mail.uid("fetch", b",".join(chosen).decode(),
+                                 "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])")
+        for part in parts or []:
+            if not isinstance(part, tuple):
+                continue
+            uid_match = re.search(rb"UID\s+(\d+)", part[0])
+            if not uid_match:
+                continue
+            headers = message_from_bytes(part[1], policy=policy.default)
+            if show_to:
+                recipient = (headers.get("To", "") or "").split(",")[0].strip()
+                name, address = _sender(recipient) if recipient else ("no one yet", "")
+            else:
+                name, address = _sender(headers.get("From", ""))
+            found.append({"uid": uid_match.group(1).decode(), "name": name or "someone", "addr": address,
+                          "subject": _decode(headers.get("Subject", "")) or "(no subject)",
+                          "date": headers.get("Date", ""), "when": _timestamp(headers.get("Date", "")),
+                          "folder": folder})
+    found.sort(key=lambda item: (item["when"], int(item["uid"])), reverse=True)    # newest first
+    return found[:INBOX_LIMIT]
+
+
 def _load_inbox(cfg, unread=True, sender=None, category="all"):
-    """Fill _inbox with up to INBOX_LIMIT emails, newest first. Returns how many unread there are.
+    """Fill _inbox with up to INBOX_LIMIT emails, newest first BY DATE. Returns how many unread there are.
     category is a Gmail category like 'primary', or 'all'."""
     global _inbox
-    found, unread_total = [], 0
+    unread_total = 0
     with _connect(cfg) as mail:
         mail.select("INBOX", readonly=True)                       # read only: nothing gets marked as read
         criteria = ["UNSEEN"] if unread else ["ALL"]
@@ -472,19 +503,10 @@ def _load_inbox(cfg, unread=True, sender=None, category="all"):
             criteria += ["X-GM-RAW", f'"category:{category}"']    # Gmail's own search, the same as typing it in Gmail
         if sender:
             criteria += ["FROM", f'"{sender}"']
-        status, data = mail.uid("search", None, *criteria)
-        uids = (data[0] or b"").split()
-        if unread and not sender:
-            unread_total = len(uids)
-        for uid in reversed(uids[-INBOX_LIMIT:]):
-            status, parts = mail.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
-            raw = next((p[1] for p in parts if isinstance(p, tuple)), b"")
-            headers = message_from_bytes(raw, policy=policy.default)
-            name, address = _sender(headers.get("From", ""))
-            found.append({"uid": uid.decode(), "name": name, "addr": address,
-                          "subject": _decode(headers.get("Subject", "")) or "(no subject)",
-                          "date": headers.get("Date", "")})
-    _inbox = found
+        if unread and not sender:                                 # the real total, whatever the date
+            status, data = mail.uid("search", None, *criteria)
+            unread_total = len((data[0] or b"").split())
+        _inbox = _fetch_items(mail, _newest_uids(mail, criteria), "INBOX")
     return unread_total
 
 
@@ -502,12 +524,35 @@ def _category_counts(cfg):
     return counts
 
 
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September",
+                "October", "November", "December")
+STALE_DAYS = 7                     # unread emails older than this are not "new"
+
+
+def _when_phrase(stamp):
+    """'today', 'yesterday', 'Monday', or '19 February' (with the year if it is not this year)."""
+    if not stamp:
+        return "at an unknown date"
+    day = datetime.fromtimestamp(stamp).date()
+    ago = (date.today() - day).days
+    if ago <= 0:
+        return "today"
+    if ago == 1:
+        return "yesterday"
+    if ago < 7:
+        return _WEEKDAYS[day.weekday()]
+    text = f"{day.day} {_MONTH_NAMES[day.month - 1]}"
+    return text if day.year == date.today().year else f"{text} {day.year}"
+
+
 def read_emails(category=""):
     cfg = _config()
     if not cfg:
         print(SETUP_STEPS)
         return NOT_SET
     chosen = _category_from(category, cfg) or cfg["category"]
+    latest = bool(set(re.findall(r"[a-z]+", (category or "").lower())) & {"latest", "recent", "newest", "last"})
     note = ""
     if chosen in CATEGORIES + ("summary",) and not _gmail(cfg):
         note, chosen = "Categories only work with Gmail, sir. ", "all"
@@ -516,18 +561,27 @@ def read_emails(category=""):
             counts = _category_counts(cfg)
             parts = [f"{n} in {c}" for c, n in counts.items() if n]
             return ("Unread: " + ", ".join(parts) + ", sir.") if parts else "No unread emails in any category, sir."
-        unread_total = _load_inbox(cfg, unread=True, category=chosen)
+        unread_total = _load_inbox(cfg, unread=not latest, category=chosen)
     except imaplib.IMAP4.error:
-        return "My email login was refused, sir. Please check the app password in the dot env file."
+        return "My email login was refused, sir. Say set up my email to check the app password."
     except Exception as e:
         print("[email] couldn't check the inbox:", e)
         return "I couldn't reach your email, sir."
     place = f" in {chosen}" if chosen in CATEGORIES else ""
     if not _inbox:
-        return f"{note}No new emails{place}, sir."
-    names = [f"{m['name']}, about {_short_subject(m['subject'])}" for m in _inbox[:SPOKEN_EMAILS]]
+        return f"{note}No {'emails' if latest else 'new emails'}{place}, sir."
+    names = [f"{m['name']}, {_when_phrase(m['when'])}, about {_short_subject(m['subject'])}"
+             for m in _inbox[:SPOKEN_EMAILS]]
+    newest = _inbox[0]
+    print(f"[email] newest {'email' if latest else 'unread'}{place}: {newest['date']} | {newest['name']}")
+    more = " Say read the first one, or read the email from someone."
+    if latest:
+        return f"{note}Your latest emails{place}, sir: " + "; ".join(names) + "." + more
+    if newest["when"] and (time.time() - newest["when"]) > STALE_DAYS * 86400:
+        return (f"{note}Nothing new this week{place}, sir. You have {unread_total} older unread email"
+                f"{'s' if unread_total != 1 else ''}; the newest is from {_when_phrase(newest['when'])}, from "
+                f"{newest['name']}. Say latest emails to hear your most recent ones, even if you've read them.")
     count = f"{unread_total} new email{'s' if unread_total != 1 else ''}{place}"
-    more = " Say read the first one, or read the email from someone." if unread_total else ""
     return f"{note}You have {count}, sir. The newest: " + "; ".join(names) + "." + more
 
 
@@ -575,12 +629,13 @@ def read_email(which=""):
             return "I couldn't find that email, sir."
 
         with _connect(cfg) as mail:
-            mail.select("INBOX", readonly=True)
+            folder = chosen.get("folder", "INBOX")
+            mail.select(folder if folder == "INBOX" else _quote(folder), readonly=True)
             status, parts = mail.uid("fetch", chosen["uid"], "(BODY.PEEK[])")
             raw = next((p[1] for p in parts if isinstance(p, tuple)), b"")
         message, body = _body_text(raw)
     except imaplib.IMAP4.error:
-        return "My email login was refused, sir. Please check the app password in the dot env file."
+        return "My email login was refused, sir. Say set up my email to check the app password."
     except Exception as e:
         print("[email] couldn't read that email:", e)
         return "I couldn't read that email, sir."
@@ -606,6 +661,273 @@ def read_email(which=""):
     except Exception as e:
         print("[email] the model didn't answer:", e)
         return "My language model didn't answer, sir."
+
+
+# ------------------------------------------------------------------ other folders (spam, bin, sent, drafts...)
+
+def _quote(name):
+    return '"' + name.replace('"', '\\"') + '"'
+
+
+# spoken name -> (the folder's IMAP flag, a Gmail search for when the folder isn't shared, what he calls it,
+#                 names to look for if the flag is missing, show who it was sent TO, has an unread count)
+FOLDERS = {
+    "spam": ("\\Junk", None, "spam", ("Spam", "Junk", "Junk E-mail", "Junk Email", "[Gmail]/Spam"), False, True),
+    "trash": ("\\Trash", None, "the bin", ("Trash", "Bin", "Deleted Items", "Deleted", "[Gmail]/Trash",
+                                           "[Gmail]/Bin"), False, True),
+    "sent": ("\\Sent", None, "sent", ("Sent", "Sent Items", "Sent Mail", "[Gmail]/Sent Mail"), True, False),
+    "drafts": ("\\Drafts", None, "drafts", ("Drafts", "[Gmail]/Drafts"), True, False),
+    "important": ("\\Important", "is:important", "important", ("[Gmail]/Important", "Important"), False, True),
+    "starred": ("\\Flagged", "is:starred", "starred", ("[Gmail]/Starred", "Starred"), False, True),
+    "snoozed": (None, "is:snoozed", "snoozed", (), False, False),
+    "all": ("\\All", None, "all mail", ("[Gmail]/All Mail", "Archive", "All Mail"), False, True),
+}
+_FOLDER_WORDS = {"spam": "spam", "junk": "spam", "bin": "trash", "trash": "trash", "deleted": "trash",
+                 "sent": "sent", "drafts": "drafts", "draft": "drafts", "important": "important",
+                 "starred": "starred", "flagged": "starred", "snoozed": "snoozed", "snooze": "snoozed"}
+_REFUSE_WORDS = {"empty", "delete", "clear", "remove", "restore", "move", "purge", "unsubscribe", "archive"}
+
+
+_SENT_QUESTION = re.compile(r"\b(did i send|have i sent|i sent|did i email|have i emailed|who did i email|what did i send"
+                            r"|what have i sent)\b")
+
+
+def _folder_from(text):
+    lowered = (text or "").lower()
+    if _SENT_QUESTION.search(lowered):
+        return "sent"
+    if "all mail" in lowered or "all my mail" in lowered:
+        return "all"
+    for word in re.findall(r"[a-z]+", lowered):
+        if word in _FOLDER_WORDS:
+            return _FOLDER_WORDS[word]
+    return None
+
+
+def _find_folder(mail, key):
+    """The real name of a folder on this account (Gmail calls spam '[Gmail]/Spam', others 'Junk'...), or None."""
+    flag, _query, _say, fallbacks, _to, _unread = FOLDERS[key]
+    names = []
+    try:
+        status, lines = mail.list()
+        for line in lines or []:
+            text = line.decode(errors="ignore")
+            match = re.match(r'\((?P<flags>[^)]*)\)\s+(?:"[^"]*"|NIL)\s+(?P<name>.+)$', text)
+            if not match:
+                continue
+            name = match.group("name").strip().strip('"')
+            names.append(name)
+            if flag and flag.lower() in match.group("flags").lower().split():
+                return name
+    except Exception:
+        pass
+    lowered = {n.lower(): n for n in names}
+    for fallback in fallbacks:
+        if fallback.lower() in lowered:
+            return lowered[fallback.lower()]
+    return None
+
+
+def _person_filter(text, key):
+    """'what did I send to Maria' -> the address (or name) to search for. 'from' for most folders, 'to' for sent."""
+    word = "to" if key == "sent" else "from"
+    lowered = (text or "").lower()
+    match = re.search(rf"\b{word}\s+([a-z']+(?:\s+[a-z']+)?)", lowered)
+    if not match and key == "sent":                                   # "did I send Jai an email", "have I emailed Maria"
+        match = re.search(r"\b(?:send|sent|email|emailed)\s+(?!an\b|a\b|any\b|the\b|my\b|it\b|email|emails\b|did\b|i\b|have\b|what\b|who\b|to\b)"
+                          r"([a-z']+)", lowered)
+    if not match:
+        return None
+    heard = [w for w in match.group(1).split() if w not in {"my", "the", "me", "spam", "junk", "bin", "trash",
+                                                           "sent", "drafts", "folder", "that", "this", "it"}]
+    if not heard:
+        return None
+    _name, address, _problem = _find_contact(f"email {' '.join(heard)}")
+    return address or heard[0]
+
+
+def check_folder(where=""):
+    global _inbox
+    cfg = _config()
+    if not cfg:
+        print(SETUP_STEPS)
+        return NOT_SET
+    words = set(re.findall(r"[a-z]+", (where or "").lower()))
+    key = _folder_from(where)
+    if key is None:
+        return "Which folder, sir? I can check spam, the bin, sent, drafts, important, starred, snoozed or all mail."
+    flag, query, say, fallbacks, show_to, has_unread = FOLDERS[key]
+    if words & _REFUSE_WORDS:
+        return f"I can only look at {say}, sir. I never delete or move your email."
+    count_only = bool(re.search(r"\bhow many\b|\bcount\b|\bnumber of\b", (where or "").lower()))
+    yes_no = bool(re.match(r"\W*(is|are) there\b|\W*(do|did) i (have|get)\b", (where or "").lower()))
+    person = _person_filter(where, key)
+
+    try:
+        with _connect(cfg) as mail:
+            folder = _find_folder(mail, key)
+            search_in, gmail_query = folder, None
+            if folder is None:                                              # not shared: search all mail the Gmail way
+                if query and _gmail(cfg):
+                    search_in, gmail_query = _find_folder(mail, "all"), query
+                if search_in is None:
+                    if key == "snoozed":
+                        return "Gmail doesn't share snoozed emails with other apps, sir. Please check it in Gmail."
+                    if _gmail(cfg):
+                        return (f"Your account isn't sharing {say} with other apps, sir. In Gmail, open settings, "
+                                "then Labels, and turn on show in IMAP.")
+                    return f"I couldn't find a {say} folder on your account, sir."
+            status, data = mail.select(_quote(search_in), readonly=True)
+            if status != "OK":
+                return "I couldn't open that folder, sir."
+            criteria = ["ALL"]
+            if gmail_query:
+                criteria += ["X-GM-RAW", f'"{gmail_query}"']
+            if person:
+                criteria += ["TO" if key == "sent" else "FROM", f'"{person}"']
+            status, found = mail.uid("search", None, *criteria)
+            total = len((found[0] or b"").split())
+            unread = 0
+            if has_unread and total:
+                status, found_unread = mail.uid("search", None, "UNSEEN", *criteria[1:])
+                unread = len((found_unread[0] or b"").split())
+            items = []
+            if total and not count_only:
+                items = _fetch_items(mail, _newest_uids(mail, criteria), search_in, show_to=show_to)
+    except imaplib.IMAP4.error as e:
+        print("[email] couldn't check the folder:", e)
+        return "I couldn't open that folder, sir."
+    except Exception as e:
+        print("[email] couldn't check the folder:", e)
+        return "I couldn't reach your email, sir."
+
+    _inbox = items or _inbox
+    who = person.split("@")[0].title() if person else ""
+    whom = f" {'to' if key == 'sent' else 'from'} {who}" if person else ""
+    if not total:
+        if key == "snoozed":
+            return "I don't see any snoozed emails, sir, though Gmail doesn't always share them with other apps."
+        return ("No, sir. " if yes_no else "") + f"Nothing in {say}{whom}, sir."
+    unread_text = f", {unread} unread" if has_unread and unread else ""
+    noun = "email" if total == 1 else "emails"
+    if key == "sent" and person:
+        summary = f"You have sent {who} {total} {noun}, sir."
+    else:
+        summary = f"You have {total} {noun} in {say}{whom}{unread_text}, sir."
+    if count_only or not items:
+        return summary
+    preposition = "to " if show_to else ""
+    names = [f"{preposition}{m['name']}, {_when_phrase(m['when'])}, about {_short_subject(m['subject'])}"
+             for m in items[:SPOKEN_EMAILS]]
+    print(f"[email] {say}: newest is {items[0]['date']} | {items[0]['name']}")
+    return (("Yes, sir. " if yes_no else "") + summary + " The newest: " + "; ".join(names) + ". "
+            "Say read the first one for more.")
+
+
+# ------------------------------------------------------------------ settings window and contacts
+
+def setup_email():
+    """Opens the settings window (email_setup.py) so nobody has to edit files."""
+    import subprocess
+    import sys
+    try:
+        subprocess.Popen([sys.executable, str(ROOT / "email_setup.py")], cwd=str(ROOT))
+    except Exception as e:
+        print("[email] couldn't open the settings window:", e)
+        return "I couldn't open the settings window, sir. Try running email underscore setup dot py."
+    return "Opening the email settings window, sir."
+
+
+def email_status():
+    """'Is my email connected?' Really tries to log in (reading and sending) and says what happened. Sends nothing."""
+    cfg = _config()
+    if not cfg:
+        print(SETUP_STEPS)
+        return NOT_SET
+    ok, message = email_config.test_connection(cfg["address"], cfg["password"], cfg["imap"], cfg["smtp"], cfg["port"])
+    print(f"[email] connection test: {ok} | {message}")
+    local, _, domain = cfg["address"].partition("@")
+    account = f"{local} at {domain.replace('.', ' dot ')}"
+    if ok:
+        return f"Your email is connected, sir. Signed in as {account}. Reading and sending both work."
+    spoken = message.split(" (")[0].rstrip(".")
+    return f"Your email isn't working, sir. {spoken}. Say set up my email to fix it."
+
+
+def _clipboard_text():
+    import subprocess
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"], capture_output=True,
+                                text=True, timeout=8, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return result.stdout
+    except Exception:
+        return ""
+
+
+def _name_after_as(request):
+    """'save the copied email as Maria Santos' -> 'Maria Santos'."""
+    match = re.search(r"\b(?:as|named|called|for)\s+([a-z][a-z'\- ]{0,40}?)(?:\s+(?:please|to my contacts|in my contacts|"
+                      r"as a contact))?\s*$", (request or "").strip().lower())
+    if not match:
+        return None
+    words = [w for w in match.group(1).split() if w not in {"a", "an", "the", "my", "contact", "contacts", "please"}]
+    return " ".join(w.capitalize() if not w.isupper() else w for w in words) or None
+
+
+def save_contact(request=""):
+    cfg = _config()
+    if not cfg:
+        return NOT_SET
+    lowered = (request or "").lower()
+    name = _name_after_as(request)
+    address = None
+    source = ""
+    if re.search(r"\b(copied|clipboard|copy)\b", lowered):
+        address = email_config.find_address(_clipboard_text())
+        source = "clipboard"
+        if not address:
+            return "I don't see an email address on your clipboard, sir. Copy the address first."
+        if not name:
+            return "What should I call them, sir? Say it like: save the copied email as Maria."
+    elif _last_read and re.search(r"\b(sender|them|him|her|this email|that email|address|contact)\b", lowered):
+        address = _last_read["addr"]
+        name = name or _last_read["name"]
+        source = "email"
+    else:
+        return ("Tell me where the address is, sir. After I read an email, say save the sender as a contact, "
+                "or copy an address and say save the copied email as Maria.")
+    if not address or "@" not in address:
+        return "I couldn't find an address to save, sir."
+    result = email_config.add_contact(name, address)
+    _contacts()
+    domain = address.split("@")[1]
+    verb = "Updated" if result == "updated" else "Saved"
+    return f"{verb} {name} in your contacts, sir. The address is at {domain}."
+
+
+def remove_contact(request=""):
+    if not _config():
+        return NOT_SET
+    match = re.search(r"\b(?:remove|delete|forget)\s+(.+?)(?:\s+(?:from|out of|in)\b|$)", (request or "").lower())
+    wanted = (match.group(1) if match else "").replace("contact", "").strip()
+    if not wanted:
+        return "Who should I remove, sir?"
+    name, _address, problem = _find_contact(f"email {wanted}")
+    if problem:
+        return problem
+    return (f"Removed {name} from your contacts, sir." if email_config.remove_contact(name)
+            else f"I couldn't find {wanted} in your contacts, sir.")
+
+
+def list_contacts():
+    if not _config():
+        return NOT_SET
+    people = email_config.read_contacts()
+    if not people:
+        return "You have no contacts yet, sir. Say set up my email to add some."
+    names = [name for name, _ in people]
+    shown = ", ".join(names[:8]) + (f", and {len(names) - 8} more" if len(names) > 8 else "")
+    return f"You have {len(names)} contact{'s' if len(names) != 1 else ''}, sir: {shown}."
 
 
 def reply_email(request=""):
@@ -636,11 +958,16 @@ def reply_email(request=""):
     return _readback(_draft, intro="Reply to")
 
 
-HINT = ("Email: use draft_email to write an email to someone in the user's contacts (pass the user's whole request "
+HINT = ("Email settings: use email_status when the user asks if their email is connected, working or set up; "
+        "use setup_email only when they want to set up, connect or change their email account; "
+        "save_contact to add a contact from the sender of the email just read or from the clipboard; "
+        "remove_contact; and list_contacts. "
+        "Email: use draft_email to write an email to someone in the user's contacts (pass the user's whole request "
         "as they said it), revise_draft to change the draft, send_email ONLY when the user says to send the current "
         "draft, save_draft to save it to the drafts folder, discard_draft to throw it away, read_emails to say "
         "what is new in the inbox (pass the category if they name one: primary, social, promotions, updates or "
-        "forums), read_email to read one email, and reply_email to reply to the email just read.")
+        "forums), check_folder for spam, the bin, sent, drafts, important, starred, snoozed or all mail (counts and "
+        "the newest emails, read only), read_email to read one email, and reply_email to reply to the email just read.")
 
 SCHEMAS = [
     tool("draft_email", "Write an email to someone in the user's contacts. It becomes a draft that is read back; "
@@ -656,6 +983,18 @@ SCHEMAS = [
          {"category": "primary, social, promotions, updates, forums, all, or each (for a count per category). "
                       "Leave empty for the default."},
          optional=("category",)),
+    tool("email_status", "Check whether the email account is connected and working, by really logging in. "
+         "Use this for questions like 'is my email connected'."),
+    tool("setup_email", "Open the email settings window, where the user connects their account and manages "
+         "contacts."),
+    tool("save_contact", "Save a contact: the sender of the email that was just read, or an address the user copied.",
+         {"request": "The user's whole request, in their own words, including the name to save it as"}),
+    tool("remove_contact", "Remove someone from the user's contacts.",
+         {"request": "The user's whole request, in their own words"}),
+    tool("list_contacts", "Say who is in the user's contacts."),
+    tool("check_folder", "Check one mail folder other than the inbox: spam, the bin, sent, drafts, important, "
+         "starred, snoozed or all mail. Says how many emails are in it and names the newest. It never deletes.",
+         {"where": "The user's question, in their own words, such as 'how many spam do I have'"}),
     tool("read_email", "Read or summarize one email from the inbox, for example the first one, or the one from a "
          "person.", {"which": "Which one, in the user's words, such as 'the first one' or 'from Maria'"},
          optional=("which",)),
@@ -671,6 +1010,12 @@ TOOLS = {
     "discard_draft": discard_draft,
     "read_draft": read_draft,
     "read_emails": read_emails,
+    "check_folder": check_folder,
+    "email_status": email_status,
+    "setup_email": setup_email,
+    "save_contact": save_contact,
+    "remove_contact": remove_contact,
+    "list_contacts": list_contacts,
     "read_email": read_email,
     "reply_email": reply_email,
 }
