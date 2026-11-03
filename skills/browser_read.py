@@ -10,22 +10,16 @@ It can't read browser pages like chrome://settings, or the Chrome Web Store.
 """
 import re
 
-from openai import OpenAI
-
 import browser_bridge as bridge
+import jarvis_llm as llm
 from skills import tool
 
-LM_URL = "http://localhost:1234/v1"
-MODEL = "local-model"
-TIMEOUT = 90
 HEAD_CHARS = 12000          # how much of a page is given to the model for summaries and questions
 TAIL_CHARS = 5000           # how much of the END of a page is used to find the latest message
 MAX_READ_CHARS = 1200       # the longest message he will read out loud
 
 OFFLINE = "I can't reach your browser, sir. Is the Jarvis Bridge extension switched on in Chrome?"
 OUTDATED = "My browser extension is out of date, sir. Please reload it in Chrome."
-
-_client = OpenAI(base_url=LM_URL, api_key="lm-studio", timeout=TIMEOUT)
 
 SPOKEN = ("You are Jarvis, answering out loud. Reply in one to three short spoken sentences. "
           "No lists, markdown, or emojis. Never invent anything that isn't in the text. Address the user as 'sir'.")
@@ -38,8 +32,8 @@ READ_LAST = ("You are Jarvis, reading a message from a web page out loud. The te
 
 
 def _ask(system, prompt, max_tokens):
-    reply = _client.chat.completions.create(
-        model=MODEL,
+    reply = llm.client().chat.completions.create(
+        model=llm.chat_model(),
         messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         max_tokens=max_tokens,
         temperature=0.2,

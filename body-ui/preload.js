@@ -23,6 +23,10 @@ contextBridge.exposeInMainWorld("jarvis", {
   onSettingsRefresh: (callback) =>
     ipcRenderer.on("settings:refresh", () => callback()),
 
+  // the language model window
+  openModelSettings: () => ipcRenderer.send("model:open"),
+  modelInfo: () => ipcRenderer.invoke("model:info"),
+
   // the window itself
   ignoreMouse: (ignore) => ipcRenderer.send("mouse:ignore", ignore),
   getBounds: () => ipcRenderer.invoke("win:bounds"),

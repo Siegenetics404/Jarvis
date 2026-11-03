@@ -14,8 +14,8 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
-from openai import OpenAI
 import learning
+import jarvis_llm as llm
 import router
 import safety
 import vocabulary
@@ -81,7 +81,6 @@ def make_body():
     return Body()
 
 
-client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
 body = make_body()         # the floating panel
 stt = None                 # loaded in the background thread, so the panel shows up at once
 tts = None
@@ -474,13 +473,8 @@ def remember(user_text, reply):
 
 def brain_problem():
     """Say what is probably wrong with the language model, so you know what to fix."""
-    try:
-        models = client.models.list().data
-    except Exception:
-        return "I can't reach my brain, sir. Is LM Studio's server running?"
-    if not models:
-        return "My language model isn't loaded, sir. Please load it again in LM Studio."
-    return "My language model stopped answering, sir. It may have crashed on the graphics card. Try reloading it."
+    return llm.problem() or ("My language model stopped answering, sir. It may have crashed on the graphics card. "
+                             "Try reloading it.")
 
 
 def ask_llm(messages, force_tool=False):
@@ -489,7 +483,8 @@ def ask_llm(messages, force_tool=False):
     for attempt in range(2):                      # LM Studio sometimes needs a moment after a hiccup
         try:
             extra = {"tool_choice": "required"} if (force_tool and attempt == 0) else {}
-            return client.chat.completions.create(model="local-model", messages=messages, tools=tools, **extra)
+            return llm.client().chat.completions.create(model=llm.chat_model(), messages=messages, tools=tools,
+                                                        **extra)
         except Exception as e:
             print(f"LM Studio error (try {attempt + 1}): {e}")
             if not (force_tool and attempt == 0):

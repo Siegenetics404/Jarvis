@@ -35,26 +35,20 @@ from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid, parseaddr, parsedate_to_datetime
 from pathlib import Path
 
-from openai import OpenAI
-
 import email_config
 import learning
+import jarvis_llm as llm
 import safety
 from skills import tool
 
 ROOT = Path(__file__).resolve().parent.parent
 
-LM_URL = "http://localhost:1234/v1"
-MODEL = "local-model"
-TIMEOUT = 90
 DRAFT_MINUTES = 30            # how long a draft waits for you before it is forgotten
 INBOX_LIMIT = 10              # how many emails he keeps track of when numbering them "first, second, third"
 SPOKEN_EMAILS = 3             # how many he names when you ask what's new
 READ_BODY_CHARS = 4000        # how much of one email is given to the model
 SPEAK_DRAFT_CHARS = 500       # how much of a draft he reads back
 SHORT_EMAIL_CHARS = 600       # emails shorter than this are read word for word, longer ones are summarized
-
-_client = OpenAI(base_url=LM_URL, api_key="lm-studio", timeout=TIMEOUT)
 
 _draft = None                 # {"to_name", "to_addr", "subject", "body", "time", "reply": {...} or None}
 _inbox = []                   # recent emails, newest first: {"uid", "name", "addr", "subject", "date"}
@@ -148,8 +142,8 @@ def _find_contact(request):
 # ------------------------------------------------------------------ talking to the local model
 
 def _ask(system, prompt, max_tokens=400, temperature=0.3):
-    reply = _client.chat.completions.create(
-        model=MODEL,
+    reply = llm.client().chat.completions.create(
+        model=llm.chat_model(),
         messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         max_tokens=max_tokens,
         temperature=temperature,

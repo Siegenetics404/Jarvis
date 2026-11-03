@@ -7,6 +7,7 @@ const {
 } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const { spawn } = require("child_process");
 
 const DATA_DIR = path.join(__dirname, "..", "data");
 const SETTINGS_FILE = path.join(DATA_DIR, "orb_settings.json");
@@ -150,7 +151,7 @@ function openSettingsWindow() {
   }
   const wa = screen.getPrimaryDisplay().workArea;
   const w = 460;
-  const h = Math.min(720, wa.height - 20);
+  const h = Math.min(800, wa.height - 20);
   settingsWin = new BrowserWindow({
     width: w,
     height: h,
@@ -246,6 +247,57 @@ ipcMain.on("win:top", (e, on) => {
   if (win && !win.isDestroyed()) win.setAlwaysOnTop(!!on, "floating");
 });
 ipcMain.on("app:quit", () => app.quit());
+
+// ---------- the "Load model..." button in the settings window ----------
+let modelProc = null;
+
+// Which language model Jarvis is using, for the line in the settings window
+async function modelInfo() {
+  let s = {};
+  try {
+    s = JSON.parse(
+      fs.readFileSync(path.join(DATA_DIR, "model_settings.json"), "utf8"),
+    );
+  } catch {
+    /* no settings yet: automatic */
+  }
+  let base = String(s.lm_url || "http://localhost:1234/v1").replace(/\/+$/, "");
+  if (!/\/v1$/.test(base)) base += "/v1";
+  const mode = s.mode === "fixed" && s.model ? "fixed" : "auto";
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2000);
+    const reply = await fetch(base + "/models", { signal: ctrl.signal });
+    clearTimeout(timer);
+    const data = await reply.json();
+    const loaded = (data.data || [])
+      .map((m) => m.id)
+      .filter((id) => !/embed/i.test(id));
+    return { reachable: true, mode, chosen: s.model || "", loaded };
+  } catch {
+    return { reachable: false, mode, chosen: s.model || "", loaded: [] };
+  }
+}
+
+ipcMain.handle("model:info", () => modelInfo());
+ipcMain.on("model:open", () => {
+  if (modelProc && modelProc.exitCode === null) return; // the model window is already open
+  const python = process.env.JARVIS_PYTHON || "python"; // Jarvis passes the Python it runs with
+  const root = path.join(__dirname, "..");
+  try {
+    modelProc = spawn(python, [path.join(root, "model_setup.py")], {
+      cwd: root,
+      detached: true,
+      stdio: "ignore",
+    });
+    modelProc.on("error", (err) =>
+      console.log("could not open the model window:", err.message),
+    );
+    modelProc.unref();
+  } catch (err) {
+    console.log("could not open the model window:", err.message);
+  }
+});
 
 app.whenReady().then(() => {
   createWindow();

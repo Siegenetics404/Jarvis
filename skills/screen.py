@@ -10,7 +10,8 @@ How it works:
   1. Takes a screenshot (kept in memory only, never saved to disk).
   2. Sends it to your local model in LM Studio. This needs a model that can see images (a "vision" model,
      for example Qwen2.5-VL, Gemma 3, or Llama 3.2 Vision). The picture never leaves your PC.
-     Your normal chat model can stay as it is: set VISION_MODEL below to use a separate model just for pictures.
+     Your normal chat model can stay as it is: pick a separate vision model in the model window
+     ("Load model..." in the panel settings). Automatic uses a loaded vision model if there is one.
   3. If your model can't see images, it reads the text on the screen instead (OCR) and the model answers from that.
      This needs:  pip install rapidocr-onnxruntime
 
@@ -22,23 +23,15 @@ import io
 import re
 import time
 
-from openai import OpenAI
-
+import jarvis_llm as llm
 from skills import tool
 
-LM_URL = "http://localhost:1234/v1"
-MODEL = "local-model"            # LM Studio uses whichever model is loaded
-VISION_MODEL = ""                # a separate model that can see images, used only for the picture,
-                                 # for example "qwen2.5-vl-3b-instruct" (copy the exact name from LM Studio).
-                                 # Leave empty to use the model that is already loaded.
 MAX_SIDE = 1344                  # the screenshot is shrunk to this many pixels on its longest side
 MAX_OCR_SIDE = 2000              # text reading uses a bigger picture than the model does, so small print stays readable
 MAX_OCR_CHARS = 6000             # how much screen text is given to the model
 MAX_READ_CHARS = 900             # the longest message he will read out loud
-TIMEOUT = 90                     # seconds to wait for the model (vision can be slow on a laptop)
 RETRY_VISION_AFTER = 600         # after a failure, try the picture again only after this many seconds
 
-_client = OpenAI(base_url=LM_URL, api_key="lm-studio", timeout=TIMEOUT)
 _vision_failed_at = 0.0
 _ocr = None
 
@@ -155,8 +148,8 @@ def read_text(image):
 # ------------------------------------------------------------------ asking the model
 
 def _ask(content, max_tokens=220, model=None, system=None):
-    reply = _client.chat.completions.create(
-        model=model or MODEL,
+    reply = llm.client().chat.completions.create(
+        model=model or llm.chat_model(),
         messages=[{"role": "system", "content": system or SYSTEM}, {"role": "user", "content": content}],
         max_tokens=max_tokens,
         temperature=0.2,
@@ -185,13 +178,14 @@ def look_at_screen(question=""):
         print("[screen] couldn't take a screenshot:", e)
         return "I couldn't capture the screen, sir."
 
-    # 1. Let the model look at the picture
-    if time.monotonic() - _vision_failed_at > RETRY_VISION_AFTER or not _vision_failed_at:
+    # 1. Let a vision model look at the picture (only when one is available)
+    seeing = llm.vision_model()
+    if seeing and (time.monotonic() - _vision_failed_at > RETRY_VISION_AFTER or not _vision_failed_at):
         try:
             answer = _ask([
                 {"type": "text", "text": f"{context}The user asks: {question}"},
                 {"type": "image_url", "image_url": {"url": _as_data_url(image)}},
-            ], max_tokens=420 if reading else 220, model=VISION_MODEL or MODEL,
+            ], max_tokens=420 if reading else 220, model=seeing,
                 system=READ_SYSTEM.replace("The text below was read from the screen, top to bottom, so it may "
                                            "contain", "The picture may contain") if reading else None)
             answer = _clean(answer)
@@ -199,7 +193,7 @@ def look_at_screen(question=""):
                 return answer[:MAX_READ_CHARS] if reading else answer
         except Exception as e:
             _vision_failed_at = time.monotonic()
-            print(f"[screen] the model couldn't look at the picture ({str(e)[:140]}). Reading the text instead.")
+            print(f"[screen] the vision model couldn't look at the picture ({str(e)[:140]}). Reading the text instead.")
 
     # 2. Read the text on the screen, and answer from that
     text = read_text(_shrink(photo, MAX_OCR_SIDE))

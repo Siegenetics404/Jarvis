@@ -28,6 +28,27 @@ ROUTE_AT = 0.70            # how alike the name must be to an installed app or p
 ROUTE_GAP = 0.12           # and how much better than the runner-up, otherwise the model decides
 
 
+# Model: "which model are you using?", "change the model", "load a model"
+_MODEL_STATUS = ("which model are you", "what model are you", "which model is loaded", "what model is loaded",
+                 "which model is running", "what model is running", "what model do you use", "which model do you use",
+                 "what is your model", "whats your model", "what brain are you", "which brain are you",
+                 "what are you running on", "which model am i")
+_MODEL_OPEN = ("change the model", "change model", "change your model", "change your brain", "switch the model",
+               "switch model", "switch your model", "switch models", "load a model", "load another model",
+               "load a different model", "load model", "load the model", "open model settings",
+               "open the model settings", "model settings", "choose a model", "pick a model", "select a model",
+               "open the model window")
+
+
+def _model_call(words):
+    phrase = " ".join(words)
+    if phrase.startswith(_MODEL_STATUS):
+        return "model_status", "{}"
+    if phrase.startswith(_MODEL_OPEN):
+        return "open_model_settings", "{}"
+    return None
+
+
 # Email: "email Maria that I'll be late", "send it", "do I have new emails?", "read the first one"
 _DRAFT_STARTS = ("send an email", "send a email", "send email", "draft an email", "draft a email", "draft email",
                  "write an email", "write a email", "write email", "compose an email", "compose email")
@@ -248,6 +269,9 @@ def quick_call(text):
     words = re.findall(r"[a-z0-9']+", (text or "").lower())
     if not words:
         return None
+    model = _model_call(words)
+    if model:
+        return model
     email = _email_call(words, text)          # emails can be long ("email Maria that I'll be late and ask...")
     if email:
         return email

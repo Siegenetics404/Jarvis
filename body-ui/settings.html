@@ -259,6 +259,20 @@
         background: #ffffff;
       }
 
+      /* The language model: which one he is using, and the button that opens the model window */
+      .modelLine {
+        margin: 2px 0 10px;
+        font:
+          12px Consolas,
+          monospace;
+        color: rgb(var(--accent));
+        word-break: break-word;
+        user-select: text;
+      }
+      #loadModel {
+        width: 100%;
+      }
+
       #foot {
         display: flex;
         justify-content: flex-end;
@@ -401,6 +415,14 @@
           ><input id="top" type="checkbox" /><span class="track"></span
           ><span>Always on top</span></label
         >
+
+        <div class="row">
+          <div class="top"><label class="cap">Language model</label></div>
+          <div class="modelLine" id="modelLine">Checking...</div>
+          <button class="btn" id="loadModel" type="button">
+            Load model...
+          </button>
+        </div>
       </div>
 
       <div id="foot">
@@ -507,7 +529,31 @@
       });
       api.onSettingsRefresh(load);
 
+      // which language model he is using right now
+      async function showModel() {
+        let info;
+        try {
+          info = await api.modelInfo();
+        } catch {
+          return;
+        }
+        const line = $("modelLine");
+        if (!info.reachable) {
+          line.textContent = "LM Studio isn't running";
+        } else if (info.mode === "fixed") {
+          line.textContent = "Always: " + info.chosen;
+        } else {
+          line.textContent = info.loaded.length
+            ? "Automatic: " + info.loaded[0]
+            : "No model is loaded";
+        }
+      }
+      $("loadModel").addEventListener("click", () => api.openModelSettings());
+      window.addEventListener("focus", showModel); // refresh when you come back from the model window
+      setInterval(showModel, 5000);
+
       load();
+      showModel();
     </script>
   </body>
 </html>

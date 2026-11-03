@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -73,6 +74,7 @@ class OrbBody:
         env.pop("ELECTRON_RUN_AS_NODE", None)             # some terminals set this, and it stops Electron from opening a window
         env["JARVIS_BODY_PORT"] = str(self._port)
         env["JARVIS_BODY_TOKEN"] = self._token
+        env["JARVIS_PYTHON"] = sys.executable             # so the settings window can open the model window
         LOG_FILE.parent.mkdir(exist_ok=True)
         log = open(LOG_FILE, "wb")
         self._proc = subprocess.Popen([str(exe), "main.js"], cwd=UI_DIR, env=env, stdout=log, stderr=log,
