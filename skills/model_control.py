@@ -23,6 +23,11 @@ def model_status():
     text = f"I'm running on {state['chat']}, sir, which is {how} in LM Studio."
     if state["tools"] is False:
         text += " It doesn't support tools, so I may not be able to act on your requests. Try another model."
+    roles = state.get("roles") or {}
+    if roles.get("coder"):
+        text += f" For code I use {roles['code']}."
+    else:
+        text += " I have no coding model loaded, so my main model handles code too."
     if state["vision"]:
         text += f" For pictures I use {state['vision']}."
     return text
@@ -40,8 +45,8 @@ def open_model_settings():
     return "Opening the model window, sir."
 
 
-HINT = ("Model: use model_status when the user asks which model or brain you are using; use open_model_settings when "
-        "they want to change, switch or load a model.")
+HINT = ("Model: use model_status when the user asks which model or brain you are using, or which models are loaded; "
+        "use open_model_settings when they want to change, switch or load a model.")
 
 SCHEMAS = [
     tool("model_status", "Say which language model Jarvis is running on right now."),

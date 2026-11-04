@@ -32,12 +32,9 @@ READ_LAST = ("You are Jarvis, reading a message from a web page out loud. The te
 
 
 def _ask(system, prompt, max_tokens):
-    reply = llm.client().chat.completions.create(
-        model=llm.chat_model(),
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=0.2,
-    )
+    reply, _model = llm.complete(
+        [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        role="chat", max_tokens=max_tokens, temperature=0.2)
     return (reply.choices[0].message.content or "").strip()
 
 

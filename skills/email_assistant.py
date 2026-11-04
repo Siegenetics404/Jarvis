@@ -142,12 +142,9 @@ def _find_contact(request):
 # ------------------------------------------------------------------ talking to the local model
 
 def _ask(system, prompt, max_tokens=400, temperature=0.3):
-    reply = llm.client().chat.completions.create(
-        model=llm.chat_model(),
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    reply, _model = llm.complete(
+        [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        role="chat", max_tokens=max_tokens, temperature=temperature)
     return (reply.choices[0].message.content or "").strip()
 
 

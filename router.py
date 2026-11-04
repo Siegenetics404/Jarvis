@@ -28,6 +28,40 @@ ROUTE_AT = 0.70            # how alike the name must be to an installed app or p
 ROUTE_GAP = 0.12           # and how much better than the runner-up, otherwise the model decides
 
 
+# Code: "write a python function that...", "explain this code", "how do I validate an email in laravel"
+_CODE_VERBS = {"write", "create", "generate", "implement", "build", "code", "fix", "debug", "refactor", "optimize",
+               "optimise", "convert", "translate", "review", "explain", "comment", "test", "rewrite", "make"}
+_CODE_NOUNS = {"function", "functions", "script", "scripts", "class", "method", "query", "regex", "component",
+               "endpoint", "algorithm", "code", "program", "bug", "snippet", "loop", "array", "variable", "migration",
+               "controller", "route", "hook", "api", "schema", "unittest", "unit"}
+_LANGUAGES = {"python", "javascript", "typescript", "php", "laravel", "react", "vue", "sql", "mysql", "postgres",
+              "html", "css", "java", "rust", "golang", "node", "nodejs", "bash", "powershell", "tailwind", "inertia",
+              "django", "flask", "regex", "jquery", "kotlin", "swift", "ruby", "c++", "csharp"}
+_NOT_CODE = {"email", "emails", "mail", "reminder", "alarm", "playlist", "song", "music", "tab", "tabs", "message",
+             "note", "notes", "timer", "folder", "file", "meeting", "event", "calendar", "list", "shopping", "poem",
+             "story", "letter", "essay", "caption", "post", "tweet"}
+_CODE_PHRASES = ("explain this code", "explain this function", "explain this script", "what does this code",
+                 "what does this function", "what does this script", "review this code", "review my code",
+                 "fix this code", "fix my code", "fix this function", "fix this script", "debug this code",
+                 "debug my code", "debug this function", "optimize this code", "refactor this", "convert this code",
+                 "comment this code", "add comments to this code", "write tests for this", "find the bug")
+
+
+def _code_call(words, text):
+    ws = set(words)
+    phrase = " ".join(words)
+    if ws & _NOT_CODE and not ws & {"code", "function", "script", "regex", "query"} and not ws & _LANGUAGES:
+        return None
+    if phrase.startswith(_CODE_PHRASES):
+        return "code_helper", json.dumps({"request": text})
+    if words[0] in _CODE_VERBS and (ws & _CODE_NOUNS or ws & _LANGUAGES) and len(words) >= 4:
+        return "code_helper", json.dumps({"request": text})
+    if phrase.startswith(("how do i", "how can i", "how to", "how would i", "how should i")) and \
+            ws & _LANGUAGES and len(words) >= 5:
+        return "code_helper", json.dumps({"request": text})
+    return None
+
+
 # Model: "which model are you using?", "change the model", "load a model"
 _MODEL_STATUS = ("which model are you", "what model are you", "which model is loaded", "what model is loaded",
                  "which model is running", "what model is running", "what model do you use", "which model do you use",
@@ -275,6 +309,9 @@ def quick_call(text):
     email = _email_call(words, text)          # emails can be long ("email Maria that I'll be late and ask...")
     if email:
         return email
+    code = _code_call(words, text)            # code requests are long too
+    if code:
+        return code
     if len(words) > 9:
         return None
     screen = _screen_call(words, text)

@@ -478,17 +478,16 @@ def brain_problem():
 
 
 def ask_llm(messages, force_tool=False):
-    """One request to LM Studio, with one quiet retry. Returns the response, or None if it won't answer.
+    """One request for the conversation model, with one quiet retry. If that model fails, the next loaded one
+    answers (see jarvis_llm.py). Returns the response, or None if nothing will answer.
     force_tool=True tells the model it MUST call a tool (used when it just described an action instead of doing it)."""
     for attempt in range(2):                      # LM Studio sometimes needs a moment after a hiccup
         try:
-            extra = {"tool_choice": "required"} if (force_tool and attempt == 0) else {}
-            return llm.client().chat.completions.create(model=llm.chat_model(), messages=messages, tools=tools,
-                                                        **extra)
-        except Exception as e:
+            response, _model = llm.complete(messages, role="chat", tools=tools, force_tool=force_tool)
+            return response
+        except llm.ModelError as e:
             print(f"LM Studio error (try {attempt + 1}): {e}")
-            if not (force_tool and attempt == 0):
-                time.sleep(2)
+            time.sleep(2)
     return None
 
 

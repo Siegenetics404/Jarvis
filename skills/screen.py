@@ -148,12 +148,9 @@ def read_text(image):
 # ------------------------------------------------------------------ asking the model
 
 def _ask(content, max_tokens=220, model=None, system=None):
-    reply = llm.client().chat.completions.create(
-        model=model or llm.chat_model(),
-        messages=[{"role": "system", "content": system or SYSTEM}, {"role": "user", "content": content}],
-        max_tokens=max_tokens,
-        temperature=0.2,
-    )
+    reply, _model = llm.complete(
+        [{"role": "system", "content": system or SYSTEM}, {"role": "user", "content": content}],
+        role="vision" if model else "chat", max_tokens=max_tokens, temperature=0.2)
     return (reply.choices[0].message.content or "").strip()
 
 

@@ -15,14 +15,16 @@ import jarvis_llm as llm
 TYPE_NAMES = {"llm": "Text", "vlm": "Vision", "embeddings": "Embedding"}
 AUTO_VISION = "Automatic"
 NO_VISION = "Off (read the text on the screen)"
+AUTO_CODE = "Automatic (a loaded coder model)"
+NO_CODE = "Off (use the main model for code)"
 
 
 class ModelWindow(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Jarvis - Language model")
-        self.geometry("640x640")
-        self.minsize(600, 600)
+        self.geometry("640x780")
+        self.minsize(600, 700)
         style = ttk.Style(self)
         try:
             style.theme_use("vista")
@@ -79,14 +81,34 @@ class ModelWindow(tk.Tk):
         actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         self.load_button = ttk.Button(actions, text="Load selected", command=self.load_selected)
         self.load_button.pack(side="left")
-        self.replace = tk.BooleanVar(value=True)
-        ttk.Checkbutton(actions, text="Unload the others first", variable=self.replace).pack(side="left", padx=8)
+        self.replace = tk.BooleanVar(value=False)             # off: you can keep a coder AND a chat model loaded together
+        ttk.Checkbutton(actions, text="Unload the others first (frees memory)", variable=self.replace).pack(
+            side="left", padx=8)
         self.test_button = ttk.Button(actions, text="Test", command=self.test)
         self.test_button.pack(side="right")
 
+        # --- coding
+        coding = ttk.LabelFrame(body, text="Coding", padding=8)
+        coding.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        coding.columnconfigure(1, weight=1)
+        ttk.Label(coding, text="Coder model").grid(row=0, column=0, sticky="w")
+        self.code = tk.StringVar(value=AUTO_CODE)
+        self.code_box = ttk.Combobox(coding, textvariable=self.code, state="readonly")
+        self.code_box.grid(row=0, column=1, sticky="ew", padx=6)
+        s0 = llm.settings()
+        self.fallback = tk.BooleanVar(value=bool(s0["fallback"]))
+        self.on_demand = tk.BooleanVar(value=bool(s0["code_on_demand"]))
+        ttk.Checkbutton(coding, text="If a model fails, try another loaded one", variable=self.fallback).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(coding, text="Let LM Studio load the coder when code is asked (slow, may unload others)",
+                        variable=self.on_demand).grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Label(coding, text="Code questions go to a coder model when one is loaded. Everything else uses the main "
+                               "model, which is faster for conversation and actions.", wraplength=560,
+                  foreground="#555").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
         # --- pictures
         seeing = ttk.LabelFrame(body, text="Reading the screen (pictures)", padding=8)
-        seeing.grid(row=4, column=0, sticky="ew", pady=10)
+        seeing.grid(row=5, column=0, sticky="ew", pady=10)
         seeing.columnconfigure(1, weight=1)
         ttk.Label(seeing, text="Vision model").grid(row=0, column=0, sticky="w")
         self.vision = tk.StringVar(value=AUTO_VISION)
@@ -97,11 +119,11 @@ class ModelWindow(tk.Tk):
             row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         bottom = ttk.Frame(body)
-        bottom.grid(row=5, column=0, sticky="ew")
+        bottom.grid(row=6, column=0, sticky="ew")
         ttk.Button(bottom, text="Save", command=self.save).pack(side="left")
         ttk.Button(bottom, text="Close", command=self.destroy).pack(side="left", padx=8)
         self.status = tk.StringVar()
-        ttk.Label(body, textvariable=self.status, wraplength=580).grid(row=6, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(body, textvariable=self.status, wraplength=580).grid(row=7, column=0, sticky="w", pady=(10, 0))
 
         self.refresh()
 
@@ -142,8 +164,9 @@ class ModelWindow(tk.Tk):
         shown = [m for m in models if m["type"] != "embeddings"]
         for m in sorted(shown, key=lambda m: (not m["loaded"], m["id"])):
             tools = {True: "Yes", False: "No", None: "?"}[m["tools"]]
+            kind = "Coder" if m.get("coder") else TYPE_NAMES.get(m["type"], m["type"])
             self.table.insert("", "end", iid=m["id"], tags=("loaded",) if m["loaded"] else (),
-                              values=(m["id"], TYPE_NAMES.get(m["type"], m["type"]),
+                              values=(m["id"], kind,
                                       "Loaded" if m["loaded"] else "", tools))
         s = llm.settings()
         if s["mode"] == "fixed" and s["model"] in self.table.get_children():
@@ -152,6 +175,11 @@ class ModelWindow(tk.Tk):
             first_loaded = next((m["id"] for m in shown if m["loaded"]), None)
             if first_loaded:
                 self.table.selection_set(first_loaded)
+
+        coders = [m["id"] for m in shown if m.get("coder")]
+        self.code_box.config(values=[AUTO_CODE, NO_CODE] + coders)
+        code_now = s["code"]
+        self.code.set(AUTO_CODE if code_now in ("auto", "") else NO_CODE if code_now == "off" else code_now)
 
         vision_models = [m["id"] for m in shown if m["type"] == "vlm"]
         self.vision_box.config(values=[AUTO_VISION, NO_VISION] + vision_models)
@@ -207,7 +235,9 @@ class ModelWindow(tk.Tk):
             messagebox.showinfo("Jarvis", "Select the model to always use, or choose Automatic.")
             return
         vision = {AUTO_VISION: "auto", NO_VISION: "off"}.get(self.vision.get(), self.vision.get())
-        llm.save_settings(lm_url=self.url.get(), mode=mode, model=model if mode == "fixed" else "", vision=vision)
+        code = {AUTO_CODE: "auto", NO_CODE: "off"}.get(self.code.get(), self.code.get())
+        llm.save_settings(lm_url=self.url.get(), mode=mode, model=model if mode == "fixed" else "", vision=vision,
+                          code=code, fallback=self.fallback.get(), code_on_demand=self.on_demand.get())
         self.status.set("Saved. Jarvis uses it from his next request, with no restart.")
 
 

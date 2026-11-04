@@ -22,7 +22,7 @@ SHOWN_ACTIONS = 5             # how many are shown to the model
 FORGET_TOOLS = {"get_time", "count_tabs", "quit_jarvis", "refresh_tab", "look_at_screen", "read_page",
                 "draft_email", "revise_draft", "send_email", "save_draft", "discard_draft", "read_draft",
                 "read_emails", "read_email", "reply_email", "check_folder", "email_status", "setup_email",
-                "save_contact", "remove_contact", "list_contacts", "model_status", "open_model_settings"}
+                "save_contact", "remove_contact", "list_contacts", "model_status", "open_model_settings", "code_helper"}
 
 # Reply fragments that mean nothing was actually opened
 FAILED_HINTS = ("what should i play", "couldn't", "which tabs", "unknown tool", "failed",
