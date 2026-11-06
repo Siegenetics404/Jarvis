@@ -63,7 +63,8 @@ def _code_call(words, text):
 
 
 # Model: "which model are you using?", "change the model", "load a model"
-_MODEL_STATUS = ("which model are you", "what model are you", "which model is loaded", "what model is loaded",
+_MODEL_STATUS = ("which models are", "what models are", "which models do you", "what models do you",
+                 "which model are you", "what model are you", "which model is loaded", "what model is loaded",
                  "which model is running", "what model is running", "what model do you use", "which model do you use",
                  "what is your model", "whats your model", "what brain are you", "which brain are you",
                  "what are you running on", "which model am i")
@@ -74,8 +75,26 @@ _MODEL_OPEN = ("change the model", "change model", "change your model", "change 
                "open the model window")
 
 
+_ONLINE_OFF = ("go offline", "work offline", "stay offline", "stay local", "use local models only", "local models only",
+               "local only", "stop using online", "stop using the online", "turn off online", "disable online",
+               "switch to local", "keep it local", "keep everything local", "no online models")
+_ONLINE_ON = ("go online", "use online models", "turn on online", "enable online", "allow online models",
+              "switch to online", "use the online models")
+_ONLINE_ADD = ("add an online model", "add online model", "add a online model", "add an api", "add an api key",
+               "add api key", "add my api key", "connect claude", "connect to claude", "connect gemini",
+               "connect to gemini", "connect openai", "connect to openai", "connect chatgpt", "connect an online",
+               "online models", "open online models", "online model settings", "add a cloud model", "add cloud models",
+               "set up an online", "setup an online")
+
+
 def _model_call(words):
     phrase = " ".join(words)
+    if phrase.startswith(_ONLINE_OFF):
+        return "online_mode", json.dumps({"action": "off"})
+    if phrase.startswith(_ONLINE_ON):
+        return "online_mode", json.dumps({"action": "on"})
+    if phrase.startswith(_ONLINE_ADD):
+        return "open_model_settings", json.dumps({"tab": "online"})
     if phrase.startswith(_MODEL_STATUS):
         return "model_status", "{}"
     if phrase.startswith(_MODEL_OPEN):

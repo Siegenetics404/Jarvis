@@ -144,7 +144,7 @@ def _find_contact(request):
 def _ask(system, prompt, max_tokens=400, temperature=0.3):
     reply, _model = llm.complete(
         [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        role="chat", max_tokens=max_tokens, temperature=temperature)
+        role="chat", data="email", max_tokens=max_tokens, temperature=temperature)
     return (reply.choices[0].message.content or "").strip()
 
 

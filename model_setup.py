@@ -6,11 +6,13 @@ Open it from the panel settings ("Load model...") or by saying "Jarvis, change t
 Automatic means he uses whatever is loaded in LM Studio. No setup, and he follows it if you load a different one.
 """
 import queue
+import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import jarvis_llm as llm
+from online_setup import OnlineTab
 
 TYPE_NAMES = {"llm": "Text", "vlm": "Vision", "embeddings": "Embedding"}
 AUTO_VISION = "Automatic"
@@ -20,11 +22,11 @@ NO_CODE = "Off (use the main model for code)"
 
 
 class ModelWindow(tk.Tk):
-    def __init__(self):
+    def __init__(self, tab="local"):
         super().__init__()
-        self.title("Jarvis - Language model")
-        self.geometry("640x780")
-        self.minsize(600, 700)
+        self.title("Jarvis - Language models")
+        self.geometry("680x820")
+        self.minsize(640, 720)
         style = ttk.Style(self)
         try:
             style.theme_use("vista")
@@ -33,8 +35,14 @@ class ModelWindow(tk.Tk):
         self.models = []
         self.busy = False
 
-        body = ttk.Frame(self, padding=14)
-        body.pack(fill="both", expand=True)
+        self.tabs = ttk.Notebook(self)
+        self.tabs.pack(fill="both", expand=True, padx=6, pady=6)
+        body = ttk.Frame(self.tabs, padding=14)
+        self.tabs.add(body, text="Local models (LM Studio)")
+        self.online = OnlineTab(self.tabs)
+        self.tabs.add(self.online, text="Online models")
+        if tab == "online":
+            self.tabs.select(self.online)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(2, weight=1)
 
@@ -242,4 +250,4 @@ class ModelWindow(tk.Tk):
 
 
 if __name__ == "__main__":
-    ModelWindow().mainloop()
+    ModelWindow(tab="online" if "--tab" in sys.argv and "online" in sys.argv else "local").mainloop()

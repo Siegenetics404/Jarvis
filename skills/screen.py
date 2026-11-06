@@ -147,10 +147,10 @@ def read_text(image):
 
 # ------------------------------------------------------------------ asking the model
 
-def _ask(content, max_tokens=220, model=None, system=None):
+def _ask(content, max_tokens=220, vision=False, system=None):
     reply, _model = llm.complete(
         [{"role": "system", "content": system or SYSTEM}, {"role": "user", "content": content}],
-        role="vision" if model else "chat", max_tokens=max_tokens, temperature=0.2)
+        role="vision" if vision else "chat", data="screen", max_tokens=max_tokens, temperature=0.2)
     return (reply.choices[0].message.content or "").strip()
 
 
@@ -175,14 +175,14 @@ def look_at_screen(question=""):
         print("[screen] couldn't take a screenshot:", e)
         return "I couldn't capture the screen, sir."
 
-    # 1. Let a vision model look at the picture (only when one is available)
-    seeing = llm.vision_model()
-    if seeing and (time.monotonic() - _vision_failed_at > RETRY_VISION_AFTER or not _vision_failed_at):
+    # 1. Let a vision model look at the picture (a local one, or an online one you allowed for the screen)
+    if llm.targets("vision", "screen") and (time.monotonic() - _vision_failed_at > RETRY_VISION_AFTER
+                                            or not _vision_failed_at):
         try:
             answer = _ask([
                 {"type": "text", "text": f"{context}The user asks: {question}"},
                 {"type": "image_url", "image_url": {"url": _as_data_url(image)}},
-            ], max_tokens=420 if reading else 220, model=seeing,
+            ], max_tokens=420 if reading else 220, vision=True,
                 system=READ_SYSTEM.replace("The text below was read from the screen, top to bottom, so it may "
                                            "contain", "The picture may contain") if reading else None)
             answer = _clean(answer)

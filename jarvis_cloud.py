@@ -11,12 +11,14 @@ This file only knows how to TALK to a provider. jarvis_llm.py decides when to us
   - A daily request limit per provider protects you from a surprise bill if something loops.
 """
 import json
+import socket
 import time
+import urllib.error
+import urllib.request
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 from openai import (APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, OpenAI,
                     PermissionDeniedError, RateLimitError)
 
@@ -247,6 +249,34 @@ def _anthropic_reply(data):
                            usage=used, model=data.get("model", ""))
 
 
+def _http(method, url, headers, body=None, timeout=DEFAULT_TIMEOUT):
+    """A plain web request with Python's built-in tools (no extra package needed).
+    Returns (status code, text). Raises CloudError for 'too slow' and 'can't reach the internet'."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
+            return reply.status, reply.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:                      # the server answered with an error: we still want its words
+        return e.code, e.read().decode("utf-8", errors="replace")
+    except (socket.timeout, TimeoutError) as e:
+        raise CloudError("timeout", "too slow") from e
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
+            raise CloudError("timeout", "too slow") from e
+        raise CloudError("network", "can't reach the internet") from e
+    except OSError as e:
+        raise CloudError("network", "can't reach the internet") from e
+
+
+def _error_text(text):
+    try:
+        data = json.loads(text)
+        return str((data.get("error") or {}).get("message") or data.get("message") or text)[:200]
+    except (ValueError, AttributeError):
+        return text[:200]
+
+
 def _status_error(status, message):
     if status in (401, 403):
         return CloudError("auth", message, status)
@@ -263,20 +293,13 @@ def _anthropic_headers(key):
 
 def _chat_anthropic(provider, key, messages, tools, force_tool, max_tokens, temperature, timeout):
     body = _anthropic_body(provider, messages, tools, force_tool, max_tokens, temperature)
+    status, text = _http("POST", _base_url(provider).rstrip("/") + "/messages", _anthropic_headers(key), body, timeout)
+    if status >= 400:
+        raise _status_error(status, _error_text(text))
     try:
-        reply = httpx.post(_base_url(provider).rstrip("/") + "/messages", headers=_anthropic_headers(key),
-                           json=body, timeout=timeout)
-    except httpx.TimeoutException as e:
-        raise CloudError("timeout", "too slow") from e
-    except httpx.RequestError as e:
-        raise CloudError("network", "can't reach the internet") from e
-    if reply.status_code >= 400:
-        try:
-            detail = reply.json().get("error", {}).get("message", reply.text)
-        except ValueError:
-            detail = reply.text
-        raise _status_error(reply.status_code, str(detail)[:200])
-    return _anthropic_reply(reply.json())
+        return _anthropic_reply(json.loads(text))
+    except ValueError as e:
+        raise CloudError("server", "the answer wasn't readable") from e
 
 
 def _chat_openai(provider, key, messages, tools, force_tool, max_tokens, temperature, timeout):
@@ -337,16 +360,15 @@ def list_models(provider, key=None):
         raise CloudError("auth", "enter the API key first")
     base = _base_url(provider).rstrip("/")
     headers = _anthropic_headers(key) if _protocol(provider) == "anthropic" else {"Authorization": f"Bearer {key}"}
+    status, text = _http("GET", base + "/models", headers, None, 20)
+    if status >= 400:
+        raise _status_error(status, _error_text(text))
     try:
-        reply = httpx.get(base + "/models", headers=headers, timeout=20)
-    except httpx.TimeoutException as e:
-        raise CloudError("timeout", "too slow") from e
-    except httpx.RequestError as e:
-        raise CloudError("network", "can't reach the internet") from e
-    if reply.status_code >= 400:
-        raise _status_error(reply.status_code, reply.text[:160])
+        entries = json.loads(text).get("data", [])
+    except ValueError as e:
+        raise CloudError("server", "the list wasn't readable") from e
     names = []
-    for entry in reply.json().get("data", []):
+    for entry in entries:
         name = str(entry.get("id", "")).removeprefix("models/")
         if name and "embed" not in name.lower():
             names.append(name)

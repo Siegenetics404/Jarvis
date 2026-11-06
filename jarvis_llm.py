@@ -11,6 +11,10 @@ Everything in Jarvis that needs a language model goes through this file.
   A coder model is recognised by its name. Load a different one in LM Studio and he follows within seconds.
   You can also pin a model to a role in the model window ("Load model..." in the panel settings).
 
+  ONLINE MODELS (optional): Gemini, Claude, OpenAI and others can join the lists (see jarvis_cloud.py). Each one is
+  given roles and either "first choice" or "backup". Online models are used ONLY for kinds of data you allowed
+  (conversation, coding, email, screen, web pages). Local models never send anything out.
+
   FALLBACK: every role has an ordered list of models. If the first one fails (not loaded, too slow, no tool
   support, empty answer) he moves to the next, and remembers for a minute which one was failing.
   The coding role ends with the chat model, so coding still works with a single model loaded.
@@ -27,6 +31,8 @@ from urllib.request import urlopen
 
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
+import jarvis_cloud as cloud
+
 ROOT = Path(__file__).resolve().parent
 SETTINGS_FILE = ROOT / "data" / "model_settings.json"
 DEFAULTS = {
@@ -37,6 +43,15 @@ DEFAULTS = {
     "code": "auto",                           # "auto" = a loaded coder model, "off" = use the chat model, or a name
     "fallback": True,                         # try the next model when one fails
     "code_on_demand": False,                  # let LM Studio load the coder when it is needed (slow, can unload others)
+    "online_enabled": True,                   # master switch for every online model ("go offline" turns it off)
+    "online_allowed": {                       # what may be sent to an online model. Email, screen and pages are off.
+        "chat": True,                         #   what you say to him
+        "code": True,                         #   coding requests, and code you copied
+        "email": False,                       #   drafting and reading email
+        "screen": False,                      #   screen pictures and the text on your screen
+        "pages": False,                       #   text of web pages you ask about
+    },
+    "providers": [],                          # online models: see jarvis_cloud.py (keys are NOT stored here)
 }
 FALLBACK_NAME = "local-model"                 # what LM Studio accepts when nothing better is known
 CACHE_SECONDS = 4                             # how long the list of models is remembered
@@ -66,7 +81,7 @@ class AllModelsFailed(ModelError):
 _cache = {"time": 0.0, "url": "", "models": [], "typed": False, "error": ""}
 _clients = {}
 _bad = {}                                    # model name -> time until which it is tried last
-last_used = {"role": "", "model": "", "fell_back": False}
+last_used = {"role": "", "model": "", "fell_back": False, "online": False}
 
 
 # ------------------------------------------------------------------ settings
@@ -77,6 +92,11 @@ def settings():
         values.update({k: v for k, v in json.loads(SETTINGS_FILE.read_text(encoding="utf-8")).items() if k in DEFAULTS})
     except (OSError, ValueError, AttributeError):
         pass
+    allowed = dict(DEFAULTS["online_allowed"])
+    if isinstance(values.get("online_allowed"), dict):
+        allowed.update({k: bool(v) for k, v in values["online_allowed"].items() if k in allowed})
+    values["online_allowed"] = allowed
+    values["providers"] = [p for p in values.get("providers", []) if isinstance(p, dict) and p.get("id")]
     values["lm_url"] = (values["lm_url"] or DEFAULTS["lm_url"]).strip().rstrip("/")
     if not values["lm_url"].endswith("/v1"):
         values["lm_url"] += "/v1"
@@ -85,7 +105,11 @@ def settings():
 
 def save_settings(**changes):
     values = settings()
-    values.update({k: v for k, v in changes.items() if k in DEFAULTS})
+    for key, value in changes.items():
+        if key == "online_allowed" and isinstance(value, dict):
+            values["online_allowed"] = {**values["online_allowed"], **value}      # change some, keep the rest
+        elif key in DEFAULTS:
+            values[key] = value
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(json.dumps(values, indent=2), encoding="utf-8")
     _cache["time"] = 0.0                       # look again next time
@@ -274,54 +298,107 @@ def _empty(response):
         return True
 
 
-def complete(messages, role="chat", tools=None, force_tool=False, max_tokens=None, temperature=None, timeout=None):
+def _online_targets(role, data, s):
+    """Online providers allowed for this role and kind of data: (first choices, backups)."""
+    if not s["online_enabled"] or not s["online_allowed"].get(data, False):
+        return [], []
+    first, backup = [], []
+    for provider in s["providers"]:
+        if not provider.get("enabled", True) or role not in provider.get("roles", []):
+            continue
+        if not provider.get("model") or not cloud.has_key(provider["id"]) or not cloud.under_limit(provider):
+            continue
+        target = {"kind": "cloud", "name": "cloud:" + provider["id"], "label": f"{provider['name']} (online)",
+                  "provider": provider}
+        (first if provider.get("first") else backup).append(target)
+    return first, backup
+
+
+def targets(role="chat", data="chat"):
+    """Everything to try for this role, in order: online first-choices, local models, online backups.
+    data says what kind of information is in the request, which decides whether an online model may see it."""
+    s = settings()
+    local = [{"kind": "local", "name": n, "label": n} for n in candidates(role)]
+    first, backup = _online_targets(role, data, s)
+    ordered = first + local + backup
+    ordered = [t for t in ordered if not _is_bad(t["name"])] + [t for t in ordered if _is_bad(t["name"])]
+    return ordered if s["fallback"] else ordered[:1]
+
+
+_BAD_FOR = {"auth": 3600, "rate": 300, "request": 600, "timeout": 60, "network": 60, "server": 60}
+
+
+def complete(messages, role="chat", tools=None, force_tool=False, max_tokens=None, temperature=None, timeout=None,
+             data="chat"):
     """Ask the best model for the role, falling back to the next one if it fails.
-    Returns (response, model that answered). Raises LMStudioDown or AllModelsFailed."""
-    names = candidates(role)
-    if not names:
+    data = what is in the request ("chat", "code", "email", "screen" or "pages"): online models only see what you
+    allowed. Returns (response, name of the model that answered). Raises LMStudioDown or AllModelsFailed."""
+    order = targets(role, data)
+    if not order:
         if not reachable():
             raise LMStudioDown("LM Studio can't be reached")
         raise AllModelsFailed([(role, "no model is loaded")])
     failures = []
-    for position, name in enumerate(names):
-        kwargs = {"model": name, "messages": messages}
-        if tools:
-            kwargs["tools"] = tools
-        if max_tokens:
-            kwargs["max_tokens"] = max_tokens
-        if temperature is not None:
-            kwargs["temperature"] = temperature
-        link = client().with_options(timeout=timeout) if timeout else client()
+    local_down = False
+    for position, target in enumerate(order):
+        name, label = target["name"], target["label"]
         try:
-            try:
-                if force_tool and tools:
-                    response = link.chat.completions.create(tool_choice="required", **kwargs)
-                else:
-                    response = link.chat.completions.create(**kwargs)
-            except (APITimeoutError, APIConnectionError):
-                raise
-            except Exception:
-                if not (force_tool and tools):
+            if target["kind"] == "cloud":
+                response = cloud.chat(target["provider"], messages, tools=tools, force_tool=force_tool,
+                                      max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+            else:
+                if local_down:
+                    continue                                        # LM Studio is off: skip its other models
+                kwargs = {"model": name, "messages": messages}
+                if tools:
+                    kwargs["tools"] = tools
+                if max_tokens:
+                    kwargs["max_tokens"] = max_tokens
+                if temperature is not None:
+                    kwargs["temperature"] = temperature
+                link = client().with_options(timeout=timeout) if timeout else client()
+                try:
+                    if force_tool and tools:
+                        response = link.chat.completions.create(tool_choice="required", **kwargs)
+                    else:
+                        response = link.chat.completions.create(**kwargs)
+                except (APITimeoutError, APIConnectionError):
                     raise
-                response = link.chat.completions.create(**kwargs)      # this model can't be forced: ask normally
+                except Exception:
+                    if not (force_tool and tools):
+                        raise
+                    response = link.chat.completions.create(**kwargs)    # this model can't be forced: ask normally
+        except cloud.CloudError as e:
+            failures.append((label, f"{e.kind}: {e}"))
+            mark_bad(name, _BAD_FOR.get(e.kind, 60))
+            if e.kind == "auth":
+                print(f"[model] {label}: the API key was refused. Check it in the model window.")
+            continue
         except APITimeoutError:
-            failures.append((name, "too slow"))
+            failures.append((label, "too slow"))
             mark_bad(name)
             continue
         except APIConnectionError as e:
-            raise LMStudioDown(str(e)) from e
+            local_down = True
+            failures.append((label, "LM Studio can't be reached"))
+            continue
         except Exception as e:
-            failures.append((name, e))
+            failures.append((label, e))
             mark_bad(name)
             continue
         if tools and _empty(response):
-            failures.append((name, "empty answer"))
+            failures.append((label, "empty answer"))
             mark_bad(name, 20)
             continue
-        last_used.update(role=role, model=name, fell_back=position > 0)
-        if position > 0:
-            print(f"[model] {role}: {names[0]} failed ({failures[0][1]}), used {name} instead")
-        return response, name
+        online = target["kind"] == "cloud"
+        last_used.update(role=role, model=label, fell_back=position > 0, online=online)
+        if online:
+            print(f"[model] {role}: answered online by {label}")
+        elif position > 0:
+            print(f"[model] {role}: {order[0]['label']} failed ({failures[0][1]}), used {label} instead")
+        return response, label
+    if local_down and all(f[1] == "LM Studio can't be reached" for f in failures):
+        raise LMStudioDown("LM Studio can't be reached")
     raise AllModelsFailed(failures)
 
 
@@ -330,6 +407,8 @@ def complete(messages, role="chat", tools=None, force_tool=False, max_tokens=Non
 def problem():
     """In plain words: why the language model can't answer right now. '' if it looks fine."""
     s = settings()
+    if any(t["kind"] == "cloud" for t in targets("chat", "chat")):
+        return ""                                              # an online model can still answer
     if not reachable():
         return "I can't reach LM Studio, sir. Is its server running?"
     if s["mode"] == "fixed" and s["model"]:
@@ -339,6 +418,26 @@ def problem():
     if not loaded_chat_models():
         return "No model is loaded in LM Studio, sir. Say load a model, and I'll open the model window."
     return ""
+
+
+def online_summary():
+    """Plain words about the online models, for 'which models are you using?'. '' when there are none."""
+    s = settings()
+    if not s["providers"]:
+        return ""
+    if not s["online_enabled"]:
+        return "Online models are switched off, so everything stays on this PC."
+    parts = []
+    for p in s["providers"]:
+        if not p.get("enabled", True):
+            continue
+        jobs = " and ".join(cloud.ROLE_NAMES.get(r, r) for r in p.get("roles", [])) or "nothing yet"
+        parts.append(f"{p['name']} for {jobs}, {'as first choice' if p.get('first') else 'as a backup'}")
+    return ("Online: " + "; ".join(parts) + ".") if parts else ""
+
+
+def set_online(enabled):
+    return save_settings(online_enabled=bool(enabled))
 
 
 def roles():
