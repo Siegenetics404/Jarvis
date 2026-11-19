@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/cover.png" alt="Jarvis: a local voice assistant for Windows" width="100%">
+  <img src="docs/cover.jpeg" alt="Jarvis: a local voice assistant for Windows" width="100%">
 </p>
 
 <h1 align="center">Jarvis</h1>
@@ -33,18 +33,18 @@
 
 ## What it can do
 
-| Area | Examples |
-|---|---|
-| **Apps and projects** | open or close any app, open a coding project in your editor |
-| **Browser** (Chrome extension) | play a song on YouTube, skip ads, skip ahead, close or refresh tabs by name, read or summarize the page you are on |
-| **Music** | Spotify and any media player: play, pause, next, previous |
-| **PC control** | volume, brightness, lock, screenshot, battery, memory, disk, shutdown and restart (with confirmation) |
-| **Reminders and notes** | reminders, alarms that ring until you dismiss them, notes you can search |
-| **Screen reading** | "what's on my screen?", "read this message", using a vision model or OCR |
-| **Email** (Gmail, Yahoo, iCloud, others) | check new mail by category, read, reply, draft, save drafts, send after you say *confirm* |
-| **Coding help** | write, explain and fix code with a coder model; the code lands on your clipboard |
-| **Developer status** | CPU load, running Docker containers, a project's git status |
-| **Clipboard** | explain, summarize, translate or fix whatever you copied |
+| Area                                     | Examples                                                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **Apps and projects**                    | open or close any app, open a coding project in your editor                                                        |
+| **Browser** (Chrome extension)           | play a song on YouTube, skip ads, skip ahead, close or refresh tabs by name, read or summarize the page you are on |
+| **Music**                                | Spotify and any media player: play, pause, next, previous                                                          |
+| **PC control**                           | volume, brightness, lock, screenshot, battery, memory, disk, shutdown and restart (with confirmation)              |
+| **Reminders and notes**                  | reminders, alarms that ring until you dismiss them, notes you can search                                           |
+| **Screen reading**                       | "what's on my screen?", "read this message", using a vision model or OCR                                           |
+| **Email** (Gmail, Yahoo, iCloud, others) | check new mail by category, read, reply, draft, save drafts, send after you say _confirm_                          |
+| **Coding help**                          | write, explain and fix code with a coder model; the code lands on your clipboard                                   |
+| **Developer status**                     | CPU load, running Docker containers, a project's git status                                                        |
+| **Clipboard**                            | explain, summarize, translate or fix whatever you copied                                                           |
 
 ## How it works
 
@@ -105,11 +105,11 @@ first start takes a minute.
 pip install -r requirements-optional.txt
 ```
 
-| Package | What it adds |
-|---|---|
-| `pillow` | screen reading |
-| `rapidocr-onnxruntime` | reads the text on your screen when your model can't see images |
-| `keyring` | keeps email passwords and API keys in Windows' password store instead of a file |
+| Package                | What it adds                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------- |
+| `pillow`               | screen reading                                                                  |
+| `rapidocr-onnxruntime` | reads the text on your screen when your model can't see images                  |
+| `keyring`              | keeps email passwords and API keys in Windows' password store instead of a file |
 
 **4. The glass orb** (optional)
 
@@ -140,12 +140,12 @@ Say **"Jarvis, hello"**.
 
 ## First-time setup (all by voice or in windows)
 
-| Say | What happens |
-|---|---|
-| *"Jarvis, set up my email"* | a window opens: provider, address, app password, **Test**, contacts |
-| *"Jarvis, change the model"* | the model window: see, load and test your LM Studio models |
-| *"Jarvis, add an online model"* | Gemini, Claude, OpenAI and others, with a key, a daily limit and privacy choices |
-| *Right-click the orb → Settings* | transparency, size, colour, position, behaviour |
+| Say                              | What happens                                                                     |
+| -------------------------------- | -------------------------------------------------------------------------------- |
+| _"Jarvis, set up my email"_      | a window opens: provider, address, app password, **Test**, contacts              |
+| _"Jarvis, change the model"_     | the model window: see, load and test your LM Studio models                       |
+| _"Jarvis, add an online model"_  | Gemini, Claude, OpenAI and others, with a key, a daily limit and privacy choices |
+| _Right-click the orb → Settings_ | transparency, size, colour, position, behaviour                                  |
 
 The one setting that is still a file: the folders where your coding projects live (`PROJECT_ROOTS` in `actions.py`).
 
@@ -157,13 +157,13 @@ double-click the orb) to cut him off.
 <details>
 <summary><b>Apps, browser and PC</b></summary>
 
-- "Open Discord", "close Spotify", "open the *portfolio* project"
-- "Play *Cup of Joe* on YouTube", "skip the ad", "skip ahead 30 seconds", "next video"
+- "Open Discord", "close Spotify", "open the _portfolio_ project"
+- "Play _Cup of Joe_ on YouTube", "skip the ad", "skip ahead 30 seconds", "next video"
 - "Close the YouTube tab", "how many tabs are open?", "refresh this tab", "refresh GitHub"
 - "Pause the music", "next song", "play the music in Spotify"
 - "Turn the volume up", "set the brightness to 40", "lock the screen", "take a screenshot"
 - "How's my battery?", "what's my CPU load?", "which Docker containers are running?"
-- "Shut down the computer" (he asks you to say *confirm*)
+- "Shut down the computer" (he asks you to say _confirm_)
 - "Close it" or "undo that": closes whatever he just opened
 
 </details>
@@ -220,11 +220,11 @@ double-click the orb) to cut him off.
 
 Jarvis gives each kind of work its own model, chosen automatically from what is loaded in LM Studio:
 
-| Role | Used for | Best model |
-|---|---|---|
-| **Conversation** | talking and choosing tools | a fast instruct model with tool use |
-| **Coding** | code questions | a coder model (found by name: *coder*, *codestral*, *devstral*, ...) |
-| **Vision** | looking at pictures | a vision model |
+| Role             | Used for                   | Best model                                                           |
+| ---------------- | -------------------------- | -------------------------------------------------------------------- |
+| **Conversation** | talking and choosing tools | a fast instruct model with tool use                                  |
+| **Coding**       | code questions             | a coder model (found by name: _coder_, _codestral_, _devstral_, ...) |
+| **Vision**       | looking at pictures        | a vision model                                                       |
 
 If one fails (not loaded, too slow, empty answer), the next one in the list answers, and a model that just failed is
 skipped for a minute. With only one model loaded, everything still works.
@@ -235,13 +235,13 @@ not used up and a paid one can't surprise you. Keys go to Windows' password stor
 
 **What may go online** is up to you, one checkbox each:
 
-| Data | Default |
-|---|---|
-| Conversation (what you say to him) | allowed once you add a provider |
+| Data                                | Default                         |
+| ----------------------------------- | ------------------------------- |
+| Conversation (what you say to him)  | allowed once you add a provider |
 | Coding requests and code you copied | allowed once you add a provider |
-| **Email** | **off** |
-| **Screen pictures and text** | **off** |
-| **Web page text** | **off** |
+| **Email**                           | **off**                         |
+| **Screen pictures and text**        | **off**                         |
+| **Web page text**                   | **off**                         |
 
 "Go offline" turns all online models off at once. The terminal prints a line every time a request goes online.
 
@@ -261,15 +261,15 @@ not used up and a paid one can't surprise you. Keys go to Windows' password stor
 
 Everything personal is kept in `data/` (and `.env`), and both are excluded from git:
 
-| File | What it is |
-|---|---|
-| `vocabulary.txt` | names Whisper should spell right; he adds the apps you use |
-| `corrections.txt` | fixes for phrases he mishears, like `java is = Jarvis` |
-| `contacts.txt` | people he may email |
-| `learned_names.json` | app and project names he learned from you |
-| `model_settings.json` | model roles, fallback, online providers (no keys) |
-| `orb_settings.json` | the panel's look and position |
-| `online_usage.json` | requests per online provider per day |
+| File                  | What it is                                                 |
+| --------------------- | ---------------------------------------------------------- |
+| `vocabulary.txt`      | names Whisper should spell right; he adds the apps you use |
+| `corrections.txt`     | fixes for phrases he mishears, like `java is = Jarvis`     |
+| `contacts.txt`        | people he may email                                        |
+| `learned_names.json`  | app and project names he learned from you                  |
+| `model_settings.json` | model roles, fallback, online providers (no keys)          |
+| `orb_settings.json`   | the panel's look and position                              |
+| `online_usage.json`   | requests per online provider per day                       |
 
 Copy each `data/*.example.txt` to the same name without `.example` to start from a template. Jarvis also works
 without them.
@@ -326,18 +326,18 @@ TOOLS = {"say_hello": say_hello}
 
 ## Troubleshooting
 
-| Problem | Fix |
-|---|---|
-| *"I can't reach LM Studio"* | open LM Studio, **Developer** tab, start the server |
-| *"No model is loaded"* | load a model in LM Studio, or say "change the model" |
-| He talks about an action but doesn't do it | your model may not support tools; open the model window and press **Test** |
-| *"My browser extension is out of date"* | reload the extension at `chrome://extensions` after updating the project |
-| *"I can't reach your browser"* | the extension is off, or Chrome isn't open |
-| The orb doesn't appear | run `npm install` in `body-ui`; see `data/body-ui.log` |
-| The orb is off screen | press **Ctrl+Alt+J** to bring it back |
-| He mishears a name | add it to `data/vocabulary.txt`, or `data/corrections.txt` |
-| Email login fails | use an **app password** (Gmail needs 2-Step Verification), not your normal password |
-| A model is too slow | use a smaller one, or set `WHISPER_MODEL = "base.en"` in `jarvis.py` |
+| Problem                                    | Fix                                                                                 |
+| ------------------------------------------ | ----------------------------------------------------------------------------------- |
+| _"I can't reach LM Studio"_                | open LM Studio, **Developer** tab, start the server                                 |
+| _"No model is loaded"_                     | load a model in LM Studio, or say "change the model"                                |
+| He talks about an action but doesn't do it | your model may not support tools; open the model window and press **Test**          |
+| _"My browser extension is out of date"_    | reload the extension at `chrome://extensions` after updating the project            |
+| _"I can't reach your browser"_             | the extension is off, or Chrome isn't open                                          |
+| The orb doesn't appear                     | run `npm install` in `body-ui`; see `data/body-ui.log`                              |
+| The orb is off screen                      | press **Ctrl+Alt+J** to bring it back                                               |
+| He mishears a name                         | add it to `data/vocabulary.txt`, or `data/corrections.txt`                          |
+| Email login fails                          | use an **app password** (Gmail needs 2-Step Verification), not your normal password |
+| A model is too slow                        | use a smaller one, or set `WHISPER_MODEL = "base.en"` in `jarvis.py`                |
 
 ## Roadmap
 
@@ -354,6 +354,7 @@ service must be off by default and clearly shown to the user.
 ## License
 
 <!-- Choose a license, add a LICENSE file, and update this line. -->
+
 MIT. See [LICENSE](LICENSE).
 
 ## Thanks
