@@ -1,0 +1,4 @@
+# Jarvis: optional extras. Install with:  pip install -r requirements-optional.txt
+pillow                  # screen reading ("what's on my screen?")
+rapidocr-onnxruntime    # reads the text on your screen when your model can't see images
+keyring                 # keeps email passwords and API keys in Windows' password store, not in a file

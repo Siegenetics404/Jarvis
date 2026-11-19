@@ -1,5 +1,8 @@
-openai
-faster-whisper
-sounddevice
+# Jarvis: required packages. Install with:  pip install -r requirements.txt
+openai>=1.30            # talks to LM Studio and to online providers that use the OpenAI protocol
+sounddevice             # microphone and speakers
 numpy
-kokoro-onnx
+faster-whisper          # speech to text (the model downloads itself on first run)
+kokoro-onnx             # text to speech (also needs the two voice files, see the README)
+yt-dlp                  # finds the right video when you ask for a song on YouTube
+websockets>=13          # the connection to the glass orb and the Chrome extension
