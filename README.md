@@ -50,18 +50,18 @@
 
 ```mermaid
 flowchart LR
-    mic([Microphone]) --> wake[Wake word<br/>"Jarvis"]
-    wake --> stt[Whisper<br/>speech to text]
-    stt --> fix[Vocabulary and<br/>corrections]
-    fix --> safe{Needs a<br/>yes or no?}
-    safe --> router[Router<br/>plain commands]
-    router -->|simple| tools[Skills]
-    router -->|everything else| llm[Language model<br/>with fallback]
+    mic(["Microphone"]) --> wake["Wake word: Jarvis"]
+    wake --> stt["Whisper<br/>speech to text"]
+    stt --> fix["Vocabulary and<br/>corrections"]
+    fix --> safe{"Needs a<br/>yes or no?"}
+    safe --> router["Router<br/>plain commands"]
+    router -->|simple| tools["Skills"]
+    router -->|everything else| llm["Language model<br/>with fallback"]
     llm --> tools
-    llm -.->|optional| cloud[Online models]
-    tools --> tts[Kokoro<br/>text to speech]
-    tts --> spk([Speaker])
-    tools --> orb[Glass orb panel]
+    llm -.->|optional| cloud["Online models"]
+    tools --> tts["Kokoro<br/>text to speech"]
+    tts --> spk(["Speaker"])
+    tools --> orb["Glass orb panel"]
 ```
 
 Simple commands such as "open Discord" or "pause the music" skip the model entirely. They are faster, and they can't be
